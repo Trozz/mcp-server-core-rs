@@ -85,6 +85,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod app;
+pub mod caller;
 pub mod combined;
 pub mod config;
 pub mod credential;

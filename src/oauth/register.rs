@@ -8,6 +8,13 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
+/// Most redirect URIs one client may register.
+pub const MAX_REDIRECT_URIS: usize = 10;
+/// Longest redirect URI accepted, in bytes.
+pub const MAX_REDIRECT_URI_LEN: usize = 2048;
+/// Longest client name accepted, in characters.
+pub const MAX_CLIENT_NAME_CHARS: usize = 200;
+
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     #[serde(default)]
@@ -18,6 +25,9 @@ pub struct RegisterRequest {
 /// Whether a client may register `uri` as a redirect URI: `https` with a host, or `http` on a
 /// loopback host (RFC 8252 native apps), without a fragment or user information.
 pub fn validate_redirect_uri(uri: &str) -> bool {
+    if uri.len() > MAX_REDIRECT_URI_LEN {
+        return false;
+    }
     let Ok(url) = url::Url::parse(uri) else {
         return false;
     };
@@ -43,12 +53,25 @@ pub async fn register(
     State(st): State<Arc<AuthState>>,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
-    if req.redirect_uris.is_empty() || !req.redirect_uris.iter().all(|u| validate_redirect_uri(u)) {
+    if req.client_name.as_deref().is_some_and(|n| {
+        n.chars().count() > MAX_CLIENT_NAME_CHARS || n.chars().any(char::is_control)
+    }) {
+        metrics::counter!("oauth_requests_total", "endpoint" => "register", "outcome" => "invalid")
+            .increment(1);
+        return error(
+            "invalid_client_metadata",
+            "client_name must be at most 200 characters, without control characters",
+        );
+    }
+    if req.redirect_uris.is_empty()
+        || req.redirect_uris.len() > MAX_REDIRECT_URIS
+        || !req.redirect_uris.iter().all(|u| validate_redirect_uri(u))
+    {
         metrics::counter!("oauth_requests_total", "endpoint" => "register", "outcome" => "invalid")
             .increment(1);
         return error(
             "invalid_redirect_uri",
-            "redirect_uris must be https, or http on a loopback host, without fragments or userinfo",
+            "redirect_uris must be 1 to 10 https URIs (http only on a loopback host), at most 2048 bytes each, without fragments or userinfo",
         );
     }
     let payload = Payload {

@@ -19,9 +19,11 @@ as claude.ai expect, with sign-in, TLS and the hardening a server shared by many
   your tools, so one deployment serves many people. Or bring your own check.
 - **Several services on one server**: each at `/<name>` and its own OAuth resource, and all their
   tools together at `/mcp`.
-- **Hardened**: sign-in limits per address and overall, one upstream check at a time per
-  credential, MCP sessions bound to the credential that opened them, host and origin checks
-  against DNS rebinding, body limits, constant-time comparisons, secrets kept out of logs.
+- **Hardened**: sign-in limits per address and overall, capped and shared upstream credential
+  checks, grants that end when the password changes and 90 days after sign-in, MCP sessions bound
+  to the credential that opened them, host and origin checks against DNS rebinding, capped client
+  registration, body limits, constant-time comparisons, secrets kept out of logs. See
+  [SECURITY.md](SECURITY.md) for what it does not do.
 - **Read-only mode and an audit log** for every service, from each tool's `read_only_hint`.
 - **Ready to deploy**: TLS from files (hot reloaded) or self-signed, or plain HTTP behind a proxy;
   a `--healthcheck` for containers; graceful shutdown; JSON logs; Prometheus metrics; OpenTelemetry
@@ -121,6 +123,15 @@ Choose with `Server::sign_in`:
 | `SignIn::OwnerPassword` | One person, with `OAUTH_ADMIN_PASSWORD`. `MCP_AUTH_TOKEN` can also be set for clients that cannot do OAuth. | Nothing: tools act with the server's own upstream configuration, say an API key in the environment. |
 | `SignIn::ServiceCredential` | Anyone with a credential the upstream service accepts, checked by the `CredentialVerifier` your service returns from `Service::credential_verifier`. | The caller's credential, as a `Credential` in the request extensions. Clients may also send it directly as their bearer token. |
 | `SignIn::Custom(fn)` | Whoever your own `CredentialVerifier` accepts. | Either, depending on its `carried()`. |
+
+Every request a service receives carries a `caller::Caller`: who signed in (`owner`,
+`key:<short hash>` for a person's own credential, `static`) and how. The audit log records it.
+
+Why only these? Every way to sign in is code on the one page that guards everything, and the
+[MCP authorization spec](https://modelcontextprotocol.io/specification/latest/basic/authorization)
+expects single sign-on to come from an authorization server built for it. For single sign-on, MFA
+or many named users, put an identity-aware gateway (Cloudflare Access, oauth2-proxy and the like)
+in front of `/authorize`, the only page a person's browser opens.
 
 With `ServiceCredential` the server stores no credential: it is checked once, then encrypted
 (ChaCha20-Poly1305, under a key derived from `OAUTH_SIGNING_KEY`) inside the person's tokens.
@@ -232,6 +243,23 @@ replica.
 
 Metrics include `http_requests_total`, `oauth_requests_total`, `oauth_login_failures_total` and
 `bearer_credential_checks_total`.
+
+### Rate limiting requests
+
+The crate limits sign-in guesses and upstream credential checks itself. Limit request rates in
+front of it, at your reverse proxy, or with your own tower layer through `Server::wrap_router`.
+Hosted clients such as claude.ai reach the server from a few shared addresses, so do not limit
+`/mcp`, `/<service>`, `/token` or `/register` per client address: one busy person would block
+everyone. Limit per bearer token instead, and per address only on `/authorize`, the page a
+person's browser opens. With nginx:
+
+```nginx
+limit_req_zone $http_authorization zone=per_token:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=sign_in:10m rate=10r/m;
+
+location /authorize { limit_req zone=sign_in burst=10; proxy_pass https://mcp; }
+location /          { limit_req zone=per_token burst=40; proxy_pass https://mcp; }
+```
 
 ## Security
 

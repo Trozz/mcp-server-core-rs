@@ -16,8 +16,7 @@ fn client(st: &mcp_server_core::oauth::AuthState) -> String {
             None,
             Payload {
                 redirect_uris: Some(vec![REDIRECT.into()]),
-                credential: sealed(st),
-                ..Default::default()
+                ..grant(st)
             },
         )
         .unwrap()
@@ -34,8 +33,7 @@ fn code(st: &mcp_server_core::oauth::AuthState, client_id: &str) -> String {
                 code_challenge: Some(CHALLENGE.into()),
                 scope: Some("mail".into()),
                 resource: Some("https://mail.example.com/mail".into()),
-                credential: sealed(st),
-                ..Default::default()
+                ..grant(st)
             },
         )
         .unwrap()
@@ -159,8 +157,7 @@ async fn access_token_is_not_accepted_as_code() {
             Some(Duration::from_secs(60)),
             Payload {
                 client_id: Some(cid.clone()),
-                credential: sealed(&st),
-                ..Default::default()
+                ..grant(&st)
             },
         )
         .unwrap();
@@ -185,8 +182,7 @@ async fn refresh_grant_returns_new_pair() {
                 client_id: Some(cid.clone()),
                 scope: Some("mail".into()),
                 resource: Some("https://mail.example.com/mail".into()),
-                credential: sealed(&st),
-                ..Default::default()
+                ..grant(&st)
             },
         )
         .unwrap();
@@ -227,8 +223,7 @@ async fn access_token_is_not_accepted_as_refresh() {
             Some(Duration::from_secs(60)),
             Payload {
                 client_id: Some(cid.clone()),
-                credential: sealed(&st),
-                ..Default::default()
+                ..grant(&st)
             },
         )
         .unwrap();
@@ -259,8 +254,7 @@ async fn refresh_grant_requires_client_id() {
             Payload {
                 client_id: Some(cid),
                 scope: Some("mail".into()),
-                credential: sealed(&st),
-                ..Default::default()
+                ..grant(&st)
             },
         )
         .unwrap();
@@ -299,8 +293,7 @@ fn refresh_token(
                 client_id: Some(cid.into()),
                 scope: Some("mail".into()),
                 resource: resource.map(String::from),
-                credential: sealed(st),
-                ..Default::default()
+                ..grant(st)
             },
         )
         .unwrap()
@@ -350,8 +343,7 @@ async fn refresh_minted_for_the_old_mcp_audience_is_rejected() {
         Payload {
             client_id: Some(cid.clone()),
             scope: Some("mail".into()),
-            credential: sealed(&st),
-            ..Default::default()
+            ..grant(&st)
         },
     )
     .unwrap();

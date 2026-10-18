@@ -14,6 +14,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What happens once failures across all clients reach [`GLOBAL_MAX_FAILURES`] in a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Ceiling {
     /// Every client is blocked until the window passes, the owner too. Right for one shared
     /// secret, such as the owner's password, where a single right guess gives everything away:

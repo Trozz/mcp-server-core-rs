@@ -270,6 +270,7 @@ async fn writes_are_audited_without_arguments_and_reads_are_not() {
             "error_kind",
             "outcome",
             "service",
+            "subject",
             "tool",
             "ts"
         ]

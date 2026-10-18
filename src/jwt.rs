@@ -9,9 +9,14 @@ use std::time::Duration;
 /// Seconds a token is still accepted after its `exp`, for clock skew.
 pub const LEEWAY_SECS: u64 = 5;
 
+/// The subject of tokens the authorization server issues to itself or to clients (client ids and
+/// CSRF tokens), which belong to no person.
+pub const SERVER_SUBJECT: &str = "server";
+
 /// What a token is for, in its `typ` claim; a token of one kind is never accepted as another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum TokenKind {
     /// A registered client: the `client_id` itself. Does not expire.
     Client,
@@ -55,6 +60,15 @@ pub struct Payload {
     /// The person's credential, sealed by `credential::Sealer` (code, access and refresh tokens).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// The sign-in version (code, access and refresh tokens): it changes when the way people sign
+    /// in changes, such as a new owner's password, which ends every earlier grant. See
+    /// [`AuthState::sign_in_version`](crate::oauth::AuthState::sign_in_version).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ver: Option<String>,
+    /// When the person signed in, Unix seconds (code, access and refresh tokens). Kept through
+    /// refreshes, so a grant ends a fixed time after sign-in however often it is refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<u64>,
 }
 
 /// A token's claims. The bearer guard adds an access token's claims to the request extensions.
@@ -64,7 +78,7 @@ pub struct Claims {
     pub iss: String,
     /// Audience: a service's resource URL for access tokens, `PUBLIC_URL` otherwise.
     pub aud: String,
-    /// Subject.
+    /// Subject: who signed in (code, access and refresh tokens), or [`SERVER_SUBJECT`].
     pub sub: String,
     /// The token's kind.
     pub typ: TokenKind,
@@ -82,6 +96,7 @@ pub struct Claims {
 
 /// Why a token was refused.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JwtError {
     /// Malformed, badly signed, expired, or for another issuer or audience.
     #[error("invalid token")]
@@ -131,7 +146,8 @@ impl Jwt {
         self.issue_for(typ, ttl, payload, &self.audience)
     }
 
-    /// Issues a token whose `aud` is `audience`, e.g. an access token bound to one resource.
+    /// Issues a token whose `aud` is `audience`, e.g. an access token bound to one resource, with
+    /// [`SERVER_SUBJECT`] as its subject.
     pub fn issue_for(
         &self,
         typ: TokenKind,
@@ -139,11 +155,23 @@ impl Jwt {
         payload: Payload,
         audience: &str,
     ) -> Result<String, JwtError> {
+        self.issue_as(typ, ttl, payload, audience, SERVER_SUBJECT)
+    }
+
+    /// Issues a token for `audience` whose subject is `subject`: who signed in.
+    pub fn issue_as(
+        &self,
+        typ: TokenKind,
+        ttl: Option<Duration>,
+        payload: Payload,
+        audience: &str,
+        subject: &str,
+    ) -> Result<String, JwtError> {
         let now = get_current_timestamp();
         let claims = Claims {
             iss: self.issuer.clone(),
             aud: audience.to_string(),
-            sub: "owner".into(),
+            sub: subject.to_string(),
             typ,
             jti: new_jti()?,
             iat: now,
@@ -151,6 +179,28 @@ impl Jwt {
             payload,
         };
         encode(&Header::new(Algorithm::HS256), &claims, &self.enc).map_err(|_| JwtError::Invalid)
+    }
+
+    /// Whether `token` looks like one this server issued: a JWT whose (unverified) `iss` is this
+    /// server. Such a token is never treated as anything else, even when it fails verification.
+    pub fn claims_issuer_here(&self, token: &str) -> bool {
+        use base64::Engine as _;
+        let mut parts = token.split('.');
+        let (Some(_), Some(body), Some(_), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| {
+                v.get("iss")
+                    .and_then(|i| i.as_str())
+                    .map(|i| i == self.issuer)
+            })
+            .unwrap_or(false)
     }
 
     /// Verifies a token issued for the default audience.
@@ -236,6 +286,37 @@ mod tests {
     }
 
     #[test]
+    fn tokens_carry_their_subject_and_name_their_issuer() {
+        let j = jwt();
+        let t = j
+            .issue_as(
+                TokenKind::Access,
+                Some(Duration::from_secs(60)),
+                Payload::default(),
+                "https://mail.example.com/mcp",
+                "key:0123456789abcdef",
+            )
+            .unwrap();
+        assert_eq!(
+            j.verify(&t, TokenKind::Access).unwrap().sub,
+            "key:0123456789abcdef"
+        );
+        assert!(j.claims_issuer_here(&t));
+        let other = Jwt::new(KEY, "https://other.example.com", "x");
+        let t = other
+            .issue(
+                TokenKind::Access,
+                Some(Duration::from_secs(60)),
+                Payload::default(),
+            )
+            .unwrap();
+        assert!(!j.claims_issuer_here(&t));
+        for junk in ["a.b.c", "", "abc", "a.b.c.d", "eyJ.eyJ.x"] {
+            assert!(!j.claims_issuer_here(junk), "{junk}");
+        }
+    }
+
+    #[test]
     fn wrong_kind_is_rejected() {
         let j = jwt();
         for kind in [TokenKind::Refresh, TokenKind::Code, TokenKind::Csrf] {
@@ -285,7 +366,7 @@ mod tests {
         let claims = Claims {
             iss: "https://mail.example.com".into(),
             aud: "https://mail.example.com/mcp".into(),
-            sub: "owner".into(),
+            sub: SERVER_SUBJECT.into(),
             typ: TokenKind::Access,
             jti: "x".into(),
             iat: get_current_timestamp() - 200,
@@ -389,7 +470,7 @@ mod tests {
             &Header::new(Algorithm::HS256),
             &NoAud {
                 iss: "https://mail.example.com".into(),
-                sub: "owner".into(),
+                sub: SERVER_SUBJECT.into(),
                 typ: TokenKind::Access,
                 jti: "x".into(),
                 iat: get_current_timestamp(),

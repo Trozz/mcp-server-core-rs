@@ -163,7 +163,7 @@ pub fn client_ip(peer: Option<IpAddr>, headers: &HeaderMap, trusted: &[IpAddr]) 
         .map(str::trim)
         .collect();
     for entry in entries.into_iter().rev() {
-        let Ok(ip) = entry.parse::<IpAddr>() else {
+        let Some(ip) = forwarded_ip(entry) else {
             return peer_ip;
         };
         if !trusted.contains(&ip) {
@@ -171,6 +171,21 @@ pub fn client_ip(peer: Option<IpAddr>, headers: &HeaderMap, trusted: &[IpAddr]) 
         }
     }
     peer_ip
+}
+
+/// The address in one `X-Forwarded-For` entry: `203.0.113.7`, `203.0.113.7:5000`, `2001:db8::1`
+/// or `[2001:db8::1]:443`.
+fn forwarded_ip(entry: &str) -> Option<IpAddr> {
+    if let Ok(ip) = entry.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    if let Ok(sock) = entry.parse::<SocketAddr>() {
+        return Some(sock.ip());
+    }
+    entry
+        .strip_prefix('[')
+        .and_then(|e| e.strip_suffix(']'))
+        .and_then(|e| e.parse().ok())
 }
 
 #[derive(Deserialize)]
@@ -334,11 +349,15 @@ fn capitalised(s: &str) -> String {
     }
 }
 
+/// An error sent back to the client's redirect URI, with `iss` (RFC 9207). `after_post` answers
+/// 303 so no user agent re-sends a form body; otherwise 302.
 fn redirect_error(
+    issuer: &str,
     redirect_uri: &str,
     state: Option<&str>,
     error: &str,
     description: &str,
+    after_post: bool,
 ) -> Response {
     let Ok(mut url) = url::Url::parse(redirect_uri) else {
         return error_page(StatusCode::BAD_REQUEST, "invalid redirect_uri");
@@ -350,8 +369,10 @@ fn redirect_error(
         if let Some(s) = state {
             q.append_pair("state", s);
         }
+        q.append_pair("iss", issuer);
     }
-    Redirect::to(url.as_str()).into_response().with_found()
+    let res = Redirect::to(url.as_str()).into_response();
+    if after_post { res } else { res.with_found() }
 }
 
 trait Found {
@@ -365,7 +386,7 @@ impl Found for Response {
     }
 }
 
-fn rejection_response(r: Rejection) -> Response {
+fn rejection_response(st: &AuthState, r: Rejection, after_post: bool) -> Response {
     match r {
         Rejection::BadClient(msg) => error_page(StatusCode::BAD_REQUEST, msg),
         Rejection::Redirect {
@@ -373,7 +394,14 @@ fn rejection_response(r: Rejection) -> Response {
             state,
             error,
             description,
-        } => redirect_error(&redirect_uri, state.as_deref(), error, description),
+        } => redirect_error(
+            &st.settings.public_url,
+            &redirect_uri,
+            state.as_deref(),
+            error,
+            description,
+            after_post,
+        ),
     }
 }
 
@@ -383,7 +411,7 @@ pub async fn get_authorize(
 ) -> Response {
     match validate(&st, &p) {
         Ok(v) => login_page(&st, &v, StatusCode::OK, None),
-        Err(r) => rejection_response(r),
+        Err(r) => rejection_response(&st, r, false),
     }
 }
 
@@ -400,7 +428,7 @@ pub async fn post_authorize(
     }
     let v = match validate(&st, &form.params) {
         Ok(v) => v,
-        Err(r) => return rejection_response(r),
+        Err(r) => return rejection_response(&st, r, true),
     };
     let csrf_ok = st
         .jwt
@@ -474,12 +502,19 @@ pub async fn post_authorize(
         scope: Some(v.scope.clone()),
         resource: Some(v.resource.clone()),
         credential: sealed,
+        ver: Some(st.sign_in_version().to_string()),
+        auth_time: Some(jsonwebtoken::get_current_timestamp()),
         ..Default::default()
     };
-    let Ok(code) = st
-        .jwt
-        .issue(TokenKind::Code, Some(Duration::from_secs(60)), payload)
-    else {
+    let subject = st.verifier.subject(entered);
+    let audience = st.settings.public_url.clone();
+    let Ok(code) = st.jwt.issue_as(
+        TokenKind::Code,
+        Some(Duration::from_secs(60)),
+        payload,
+        &audience,
+        &subject,
+    ) else {
         return error_page(StatusCode::INTERNAL_SERVER_ERROR, "token error");
     };
     let Ok(mut url) = url::Url::parse(&v.redirect_uri) else {
@@ -491,10 +526,11 @@ pub async fn post_authorize(
         if let Some(s) = &v.state {
             q.append_pair("state", s);
         }
+        q.append_pair("iss", &st.settings.public_url);
     }
     metrics::counter!("oauth_requests_total", "endpoint" => "authorize", "outcome" => "ok")
         .increment(1);
-    tracing::info!("oauth authorization granted");
+    tracing::info!(subject = %subject, "oauth authorization granted");
     // 303 after the POST that carried the credential, so no user agent re-sends the form body
     // to the client's redirect_uri (RFC 9700 4.12).
     let mut res = Redirect::to(url.as_str()).into_response();
@@ -715,6 +751,22 @@ mod tests {
             client_ip(Some(proxy), &headers, &[proxy, inner]),
             "198.51.100.7".parse::<IpAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn client_ip_reads_entries_with_ports() {
+        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
+        for (entry, want) in [
+            ("198.51.100.7:5000", "198.51.100.7"),
+            ("[2001:db8::7]:443", "2001:db8::7"),
+            ("[2001:db8::8]", "2001:db8::8"),
+        ] {
+            assert_eq!(
+                client_ip(Some(proxy), &xff(&[entry]), &[proxy]),
+                want.parse::<IpAddr>().unwrap(),
+                "{entry}"
+            );
+        }
     }
 
     #[test]

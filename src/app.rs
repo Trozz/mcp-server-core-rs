@@ -51,19 +51,27 @@ use std::sync::Arc;
 
 /// Shortest `OAUTH_ADMIN_PASSWORD` accepted.
 pub const MIN_ADMIN_PASSWORD_CHARS: usize = 12;
+/// `OAUTH_ADMIN_PASSWORD`s shorter than this get a warning at startup.
+pub const RECOMMENDED_ADMIN_PASSWORD_CHARS: usize = 15;
 /// `MCP_AUTH_TOKEN`s shorter than this get a warning at startup.
 pub const RECOMMENDED_STATIC_TOKEN_CHARS: usize = 32;
 
 /// How people sign in, and what their tokens carry.
+///
+/// Deliberately small. For single sign-on, MFA or many named users, put an identity-aware
+/// gateway (such as Cloudflare Access or oauth2-proxy) in front of `/authorize`, or ask for an
+/// external authorization server mode; see the README.
 #[derive(Clone, Copy)]
+#[non_exhaustive]
 pub enum SignIn {
     /// One person, the owner, signs in with `OAUTH_ADMIN_PASSWORD`. Tools act with the server's
     /// own upstream configuration (say, an account's app password in the environment).
     /// `MCP_AUTH_TOKEN` may be set as well, for clients that cannot do OAuth.
     OwnerPassword,
     /// Each person signs in with their own credential for the upstream service, checked by the
-    /// [`CredentialVerifier`] of the first enabled service that has one
-    /// ([`Service::credential_verifier`]). Tools find it as a
+    /// [`CredentialVerifier`] of the enabled service that has one
+    /// ([`Service::credential_verifier`]; more than one is a configuration error, since each
+    /// service's tools would receive a credential meant for another upstream). Tools find it as a
     /// [`Credential`](crate::credential::Credential) in the request extensions, so one server can
     /// serve many people. Clients may also send the credential itself as their bearer token.
     ServiceCredential,
@@ -109,6 +117,7 @@ impl Safety {
 }
 
 /// A server's configuration, read and checked, with its services built.
+#[non_exhaustive]
 pub struct Loaded {
     /// The core settings.
     pub core: CoreConfig,
@@ -120,6 +129,8 @@ pub struct Loaded {
     pub combined: bool,
     /// Who may sign in.
     pub verifier: Arc<dyn CredentialVerifier>,
+    /// Settings that work but are weak, logged at startup.
+    pub warnings: Vec<String>,
 }
 
 /// Builds an MCP server binary from services. See the [module documentation](self).
@@ -132,6 +143,7 @@ pub struct Server {
     sign_in: SignIn,
     icon: Option<(&'static [u8], &'static str)>,
     docs_url: Option<&'static str>,
+    wrap: Option<fn(axum::Router) -> axum::Router>,
 }
 
 /// Why `name` cannot be a service name, if it cannot.
@@ -160,6 +172,7 @@ impl Server {
             sign_in: SignIn::OwnerPassword,
             icon: None,
             docs_url: None,
+            wrap: None,
         }
     }
 
@@ -212,6 +225,24 @@ impl Server {
     /// `serverInfo`, and an SVG.
     pub fn icon(mut self, png: &'static [u8], svg: &'static str) -> Self {
         self.icon = Some((png, svg));
+        self
+    }
+
+    /// Wraps the whole application in your own layers, outermost, for example a request rate
+    /// limiter or extra routes:
+    ///
+    /// ```
+    /// # use mcp_server_core::app::Server;
+    /// use mcp_server_core::axum::{Router, routing::get};
+    ///
+    /// fn extras(app: Router) -> Router {
+    ///     app.route("/version", get(|| async { env!("CARGO_PKG_VERSION") }))
+    /// }
+    ///
+    /// let server = Server::new("mcp-example", "1.0.0").wrap_router(extras);
+    /// ```
+    pub fn wrap_router(mut self, wrap: fn(axum::Router) -> axum::Router) -> Self {
+        self.wrap = Some(wrap);
         self
     }
 
@@ -338,19 +369,43 @@ impl Server {
             }
         }
         if matches!(self.sign_in, SignIn::ServiceCredential) {
-            verifier = services.iter().find_map(|s| s.credential_verifier());
-            if verifier.is_none() && !services.is_empty() {
-                env.errors
-                    .push("no enabled service defines how people sign in".to_string());
+            let defining: Vec<(&str, Arc<dyn CredentialVerifier>)> = services
+                .iter()
+                .filter_map(|s| s.credential_verifier().map(|v| (s.name(), v)))
+                .collect();
+            match defining.as_slice() {
+                [] if !services.is_empty() => env
+                    .errors
+                    .push("no enabled service defines how people sign in".to_string()),
+                [] => {}
+                [(_, v)] => verifier = Some(v.clone()),
+                several => env.errors.push(format!(
+                    "more than one enabled service defines how people sign in ({}): enable one of them",
+                    several.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                )),
             }
         }
+        let mut warnings = Vec::new();
         if let (Some(core), Some(v)) = (&core, &verifier)
-            && core.oauth.static_token.is_some()
-            && v.carried()
+            && let Some(token) = &core.oauth.static_token
         {
-            env.errors.push(format!(
-                "MCP_AUTH_TOKEN cannot be used when people sign in with their own {}",
-                v.label()
+            if let Some(problem) =
+                crate::oauth::static_token_problem(token.expose_secret(), v.as_ref())
+            {
+                env.errors.push(problem);
+            } else if token.expose_secret().chars().count() < RECOMMENDED_STATIC_TOKEN_CHARS {
+                warnings.push(format!(
+                    "MCP_AUTH_TOKEN is shorter than {RECOMMENDED_STATIC_TOKEN_CHARS} characters: use a long random value"
+                ));
+            }
+        }
+        if matches!(self.sign_in, SignIn::OwnerPassword)
+            && let Some(p) = env.optional("OAUTH_ADMIN_PASSWORD")
+            && p.chars().count() < RECOMMENDED_ADMIN_PASSWORD_CHARS
+            && p.chars().count() >= MIN_ADMIN_PASSWORD_CHARS
+        {
+            warnings.push(format!(
+                "OAUTH_ADMIN_PASSWORD is shorter than {RECOMMENDED_ADMIN_PASSWORD_CHARS} characters: a longer passphrase is much harder to guess"
             ));
         }
         // Services may share variables: report each error once.
@@ -368,6 +423,7 @@ impl Server {
             },
             combined,
             verifier: verifier?,
+            warnings,
         })
     }
 
@@ -432,14 +488,30 @@ impl Server {
         if combined {
             routers.push((COMBINED, self.combined_router(loaded, ctx)));
         }
-        let app = build_app(auth, routers);
-        match self.icon {
+        let mut app = build_app(auth, routers);
+        if loaded.core.tls.is_tls() {
+            // Only when this process terminates TLS; behind a proxy, the proxy decides.
+            app = app.layer(axum::middleware::map_response(
+                |mut res: axum::response::Response| async move {
+                    res.headers_mut().insert(
+                        axum::http::header::STRICT_TRANSPORT_SECURITY,
+                        axum::http::HeaderValue::from_static("max-age=31536000"),
+                    );
+                    res
+                },
+            ));
+        }
+        let app = match self.icon {
             Some((png, _)) => app.route(
                 "/favicon.ico",
                 axum::routing::get(move || async move {
                     ([(axum::http::header::CONTENT_TYPE, "image/png")], png)
                 }),
             ),
+            None => app,
+        };
+        match self.wrap {
+            Some(wrap) => wrap(app),
             None => app,
         }
     }
@@ -473,12 +545,8 @@ impl Server {
             observability::log_filter(&obs.log_level, &Self::log_caps(&loaded.services));
         let _guard = observability::init(&obs)?;
         tracing::info!(version = self.version, "starting {}", self.name);
-        if let Some(token) = &loaded.core.oauth.static_token
-            && token.expose_secret().chars().count() < RECOMMENDED_STATIC_TOKEN_CHARS
-        {
-            tracing::warn!(
-                "MCP_AUTH_TOKEN is shorter than {RECOMMENDED_STATIC_TOKEN_CHARS} characters: use a long random value"
-            );
+        for w in &loaded.warnings {
+            tracing::warn!("{w}");
         }
         for s in &loaded.services {
             tracing::info!(
@@ -565,9 +633,10 @@ impl Server {
 /// Reads `OAUTH_ADMIN_PASSWORD` for [`SignIn::OwnerPassword`].
 fn owner_password(env: &mut ServiceEnv) -> Option<Arc<dyn CredentialVerifier>> {
     let password = env.secret_required("OAUTH_ADMIN_PASSWORD")?;
-    if password.expose_secret().chars().count() < MIN_ADMIN_PASSWORD_CHARS {
+    let p = password.expose_secret();
+    if p.chars().count() < MIN_ADMIN_PASSWORD_CHARS || p.trim().is_empty() {
         env.errors.push(format!(
-            "OAUTH_ADMIN_PASSWORD must be at least {MIN_ADMIN_PASSWORD_CHARS} characters"
+            "OAUTH_ADMIN_PASSWORD must be at least {MIN_ADMIN_PASSWORD_CHARS} characters, not only spaces"
         ));
         return None;
     }
@@ -889,6 +958,69 @@ mod tests {
         let s = Server::new("mcp-test", "1").service("alpha", alpha);
         let mut e = with_core(&[("MCP_AUTH_TOKEN", "static-token")]);
         assert!(s.load(&mut e).is_some(), "{:?}", e.errors);
+    }
+
+    #[test]
+    fn two_services_that_both_define_sign_in_are_refused() {
+        fn keyed_too(_: &mut ServiceEnv) -> Option<Arc<dyn Service>> {
+            struct KeyedToo;
+            impl Service for KeyedToo {
+                fn name(&self) -> &'static str {
+                    "keyed-too"
+                }
+                fn handler(&self) -> DynHandler {
+                    DynHandler::new(Nothing)
+                }
+                fn credential_verifier(&self) -> Option<Arc<dyn CredentialVerifier>> {
+                    Keyed.credential_verifier()
+                }
+            }
+            Some(Arc::new(KeyedToo))
+        }
+        let s = Server::new("mcp-test", "1")
+            .service("keyed", keyed)
+            .service("keyed-too", keyed_too)
+            .sign_in(SignIn::ServiceCredential);
+        let mut e = env(&CORE[..2]);
+        assert!(s.load(&mut e).is_none());
+        assert_eq!(
+            e.errors,
+            vec![
+                "more than one enabled service defines how people sign in (keyed, keyed-too): enable one of them"
+                    .to_string()
+            ]
+        );
+        let mut e = env(&[CORE[0], CORE[1], ("MCP_SERVICES", "keyed-too")]);
+        assert!(s.load(&mut e).is_some(), "{:?}", e.errors);
+    }
+
+    #[test]
+    fn a_password_of_spaces_is_refused_and_a_short_one_warned_about() {
+        let s = Server::new("mcp-test", "1").service("alpha", alpha);
+        let mut e = with_core(&[("OAUTH_ADMIN_PASSWORD", "              ")]);
+        assert!(s.load(&mut e).is_none());
+        assert!(e.errors[0].contains("not only spaces"), "{:?}", e.errors);
+        let mut e = with_core(&[("OAUTH_ADMIN_PASSWORD", "twelve chars")]);
+        let loaded = s.load(&mut e).expect("loads");
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("shorter than 15"));
+        let mut e = with_core(&[("OAUTH_ADMIN_PASSWORD", "a much longer passphrase")]);
+        assert!(s.load(&mut e).expect("loads").warnings.is_empty());
+    }
+
+    #[test]
+    fn a_static_token_shaped_like_a_jwt_or_short_is_reported() {
+        let s = Server::new("mcp-test", "1").service("alpha", alpha);
+        let mut e = with_core(&[("MCP_AUTH_TOKEN", "aaa.bbb.ccc")]);
+        assert!(s.load(&mut e).is_none());
+        assert!(e.errors[0].contains("shape of a JWT"), "{:?}", e.errors);
+        let mut e = with_core(&[("MCP_AUTH_TOKEN", "short-token")]);
+        let loaded = s.load(&mut e).expect("loads");
+        assert!(
+            loaded.warnings.iter().any(|w| w.contains("MCP_AUTH_TOKEN")),
+            "{:?}",
+            loaded.warnings
+        );
     }
 
     #[test]

@@ -46,8 +46,7 @@ fn access_for(st: &mcp_server_core::oauth::AuthState, service: &str) -> String {
             Some(Duration::from_secs(60)),
             Payload {
                 client_id: Some("client-1".into()),
-                credential: sealed(st),
-                ..Default::default()
+                ..grant(st)
             },
             &st.resource(service),
         )
@@ -197,12 +196,27 @@ async fn an_unavailable_check_is_503_with_retry_after() {
 }
 
 #[tokio::test]
-async fn implausible_or_expired_bearers_are_not_sent_upstream() {
+async fn implausible_bearers_and_this_servers_own_tokens_are_never_sent_upstream() {
     let v = verifier();
     let st = state_with_verifier(v.clone());
     let app = full_app(st.clone());
-    let expired_looking = "aaa.bbb.ccc";
-    for token in [expired_looking, "has space", &"x".repeat(300)] {
+    // An expired access token from this server: refused without asking upstream.
+    let expired = {
+        let other = mcp_server_core::jwt::Jwt::new(
+            b"0123456789abcdef0123456789abcdef",
+            PUBLIC_URL,
+            PUBLIC_URL,
+        );
+        other
+            .issue_for(
+                TokenKind::Refresh,
+                Some(Duration::from_secs(1)),
+                grant(&st),
+                &st.resource("mail"),
+            )
+            .unwrap()
+    };
+    for token in [expired.as_str(), "has space", &"x".repeat(300)] {
         let req = Request::post("/mail")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::empty())
@@ -214,6 +228,18 @@ async fn implausible_or_expired_bearers_are_not_sent_upstream() {
         );
     }
     assert_eq!(v.checks(), 0);
+}
+
+#[tokio::test]
+async fn a_credential_shaped_like_a_jwt_is_still_checked_as_a_credential() {
+    let dotted = "abc.def.ghi-key";
+    let v = TestVerifier::accepting(&[dotted]);
+    let app = full_app(state_with_verifier(v.clone()));
+    assert_eq!(
+        send(&app, mcp_call(Some(dotted))).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(v.checks(), 1);
 }
 
 #[tokio::test]
@@ -506,6 +532,24 @@ async fn the_owner_password_is_never_a_bearer_token() {
 }
 
 #[tokio::test]
+async fn junk_bearer_tokens_never_lock_the_owner_out_without_a_static_token() {
+    let st = owner_state(None, &["mail"]);
+    let app = full_app(st.clone());
+    for i in 0..200u32 {
+        let peer = [10, 7, (i / 256) as u8, (i % 256) as u8];
+        assert_eq!(
+            send(&app, from("x", peer)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let access = access_for(&st, "mail");
+    assert_eq!(
+        send(&app, from(&access, [192, 0, 2, 50])).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn wrong_static_tokens_are_rate_limited_and_then_even_the_right_one_waits() {
     let app = full_app(owner_state(Some(STATIC_TOKEN), &["mail"]));
     for i in 0..5 {
@@ -559,7 +603,7 @@ async fn expired_or_foreign_oauth_tokens_never_count_as_guesses() {
 
 #[tokio::test]
 #[should_panic(
-    expected = "a static token cannot be used when people sign in with their own credential"
+    expected = "MCP_AUTH_TOKEN cannot be used when people sign in with their own API key"
 )]
 async fn a_static_token_with_carried_credentials_is_refused() {
     let _ = mcp_server_core::oauth::AuthState::new(

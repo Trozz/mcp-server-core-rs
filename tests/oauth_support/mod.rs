@@ -129,6 +129,25 @@ fn settings(trusted_proxies: Vec<IpAddr>, static_token: Option<&str>) -> OAuthSe
     }
 }
 
+/// What a grant of `st` carries: `KEY` sealed when `st` carries credentials, the current sign-in
+/// version and a sign-in time of now.
+pub fn grant(st: &AuthState) -> mcp_server_core::jwt::Payload {
+    mcp_server_core::jwt::Payload {
+        credential: sealed(st),
+        ver: Some(st.sign_in_version().to_string()),
+        auth_time: Some(jsonwebtoken_now()),
+        ..Default::default()
+    }
+}
+
+/// Unix seconds now.
+pub fn jsonwebtoken_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 /// `KEY` sealed for tokens of `st`, when `st` carries credentials.
 pub fn sealed(st: &AuthState) -> Option<String> {
     st.verifier()

@@ -367,3 +367,27 @@ async fn people_signing_in_with_their_own_key_reach_tools_with_it() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn hsts_is_sent_only_when_this_process_terminates_tls() {
+    let server = owner_server();
+    for (insecure, want) in [("true", false), ("false", true)] {
+        let app = build(
+            &server,
+            &[
+                ("OAUTH_ADMIN_PASSWORD", "a long password"),
+                ("INSECURE_HTTP", insecure),
+            ],
+        );
+        let res = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers().contains_key("strict-transport-security"),
+            want,
+            "INSECURE_HTTP={insecure}"
+        );
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+    }
+}

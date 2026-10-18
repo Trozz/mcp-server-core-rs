@@ -1,5 +1,6 @@
 use super::AuthState;
 use super::authorize::client_ip;
+use crate::caller::{Caller, STATIC_SUBJECT, Via};
 use crate::credential::{self, Credential, CredentialCheck};
 use crate::credential::{CheckRunner, Lead, Ticket};
 use crate::guards::Reservation;
@@ -112,17 +113,19 @@ fn looks_like_jwt(token: &str) -> bool {
 
 /// Guards one service path. It lets a request through with:
 ///
-/// - an OAuth access token this server issued for this service. When the verifier carries
-///   credentials, the token's sealed credential is opened and added as a [`Credential`]
-///   extension; the token's [`Claims`](crate::jwt::Claims) are added either way;
+/// - an OAuth access token this server issued for this service, whose grant still holds (see
+///   [`AuthState::sign_in_version`]). When the verifier carries credentials, the token's sealed
+///   credential is opened and added as a [`Credential`] extension;
 /// - the static token (`MCP_AUTH_TOKEN`), when one is configured;
 /// - when the verifier [accepts bearer credentials](crate::credential::CredentialVerifier::accepts_bearer),
 ///   the person's credential itself, checked with the verifier (the verdict is cached briefly
-///   under its fingerprint) and added as a [`Credential`] extension when carried.
+///   under its fingerprint) and added as a [`Credential`] extension.
 ///
-/// Anything else gets 401 with a `WWW-Authenticate` header naming the service's resource
-/// metadata, as MCP clients expect. Wrong static tokens and rejected credentials count towards
-/// the per-address sign-in limit.
+/// Every request let through gets a [`Caller`] extension; one with an OAuth token also gets its
+/// [`Claims`](crate::jwt::Claims). Anything else gets 401 with a `WWW-Authenticate` header naming
+/// the service's resource metadata, as MCP clients expect. Wrong static tokens and rejected
+/// credentials count towards the per-address sign-in limit; tokens this server issued never do,
+/// even expired ones, and are never sent upstream.
 pub async fn require_bearer(
     State((st, service)): State<(Arc<AuthState>, String)>,
     mut req: Request,
@@ -138,31 +141,41 @@ pub async fn require_bearer(
         return unauthorized(&st, &service, false);
     };
 
-    let jwt_shaped = looks_like_jwt(&token);
-    if jwt_shaped
-        && let Ok(claims) = st
+    // 1. An OAuth token from this server.
+    if looks_like_jwt(&token) {
+        if let Ok(claims) = st
             .jwt
             .verify_for(&token, TokenKind::Access, &st.resource(&service))
-    {
-        if st.verifier.carried() {
-            let Some(credential) = claims
-                .payload
-                .credential
-                .as_deref()
-                .and_then(|sealed| st.sealer.open(sealed).ok())
-            else {
+        {
+            if !st.grant_is_current(&claims) {
                 return unauthorized(&st, &service, true);
-            };
-            req.extensions_mut().insert(credential);
+            }
+            if st.verifier.carried() {
+                let Some(credential) = claims
+                    .payload
+                    .credential
+                    .as_deref()
+                    .and_then(|sealed| st.sealer.open(sealed).ok())
+                else {
+                    return unauthorized(&st, &service, true);
+                };
+                req.extensions_mut().insert(credential);
+            }
+            let caller = Caller::new(
+                claims.sub.clone(),
+                Via::OAuth {
+                    client_id: claims.payload.client_id.clone(),
+                },
+            );
+            req.extensions_mut().insert(caller);
+            req.extensions_mut().insert(claims);
+            return next.run(req).await;
         }
-        req.extensions_mut().insert(claims);
-        return next.run(req).await;
-    }
-    let static_token = st.settings.static_token.as_ref().map(|t| t.expose_secret());
-    // An expired or foreign OAuth token is refused without counting against the client, unless
-    // the static token has the same shape and the request could be a guess at it.
-    if jwt_shaped && !static_token.is_some_and(looks_like_jwt) {
-        return unauthorized(&st, &service, true);
+        // Expired, for another service, or signed under an old key or sign-in: never a guess at
+        // anything else, and never forwarded upstream.
+        if st.jwt.claims_issuer_here(&token) || !st.verifier.accepts_bearer() {
+            return unauthorized(&st, &service, true);
+        }
     }
 
     let peer = req
@@ -171,34 +184,37 @@ pub async fn require_bearer(
         .map(|c| c.0.ip());
     let ip = client_ip(peer, req.headers(), &st.settings.trusted_proxies);
 
-    if let Some(expected) = static_token {
-        // A client blocked for wrong tokens gets no further guesses, right or wrong.
-        if st.limiter.is_blocked(ip) {
+    // 2. The static token. Its verifier never accepts bearer credentials (AuthState::new
+    // enforces it), so a miss here is a wrong guess: the attempt is counted before comparing.
+    if let Some(expected) = &st.settings.static_token {
+        let Some(reservation) = st.limiter.try_reserve(ip) else {
             metrics::counter!("bearer_credential_checks_total", "outcome" => "rate_limited")
                 .increment(1);
             return too_many_attempts();
-        }
-        if pkce::ct_eq(&token, expected) {
+        };
+        if pkce::ct_eq(&token, expected.expose_secret()) {
+            st.limiter.refund(reservation);
+            req.extensions_mut()
+                .insert(Caller::new(STATIC_SUBJECT, Via::StaticToken));
             return next.run(req).await;
         }
-    }
-
-    if !st.verifier.accepts_bearer() || jwt_shaped {
-        // Only the static token could have matched: count the miss, so it cannot be guessed.
-        if st.limiter.try_reserve(ip).is_none() {
-            metrics::counter!("bearer_credential_checks_total", "outcome" => "rate_limited")
-                .increment(1);
-            return too_many_attempts();
-        }
-        tracing::warn!(%ip, "unknown bearer token rejected");
+        tracing::warn!(%ip, "wrong static token rejected");
         return unauthorized(&st, &service, true);
     }
 
+    // 3. The person's own credential.
+    if !st.verifier.accepts_bearer() {
+        // Nothing to guess at: refused without counting, so junk cannot lock anyone out.
+        return unauthorized(&st, &service, true);
+    }
+    let token = st.verifier.prepare(&token).to_owned();
     if !st.verifier.plausible(&token) {
         return unauthorized(&st, &service, true);
     }
     let fingerprint = credential::fingerprint(&token);
     match st.bearer_checks.get(&fingerprint) {
+        // A credential found valid recently: its holder has already proved possession, so a
+        // blocked address that shares it (say, behind one NAT) is still let in.
         Some(true) => {}
         Some(false) => return unauthorized(&st, &service, true),
         None => {
@@ -237,6 +253,9 @@ pub async fn require_bearer(
             }
         }
     }
+    let subject = st.verifier.subject(&token);
+    req.extensions_mut()
+        .insert(Caller::new(subject, Via::Credential));
     if st.verifier.carried() {
         req.extensions_mut().insert(Credential::new(token));
     }

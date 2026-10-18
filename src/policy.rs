@@ -19,6 +19,7 @@
 // The wrapper forwards every handler method, including the legacy (SEP-2577 deprecated) ones.
 #![expect(deprecated)]
 
+use crate::caller::Caller;
 use crate::credential::Credential;
 use crate::jwt::Claims;
 use axum::http::request::Parts;
@@ -73,6 +74,9 @@ pub struct AuditLine {
     /// `oauth:<client_id>`, `oauth` (a token without a client id), `credential` (a credential
     /// sent as the bearer token) or `static` (the static token).
     pub caller: Option<String>,
+    /// Who signed in ([`Caller::subject`]): `owner`, `key:<16 hex digits>`, `static` or a custom
+    /// verifier's subject. Never a credential.
+    pub subject: Option<String>,
     /// How long the call took.
     pub elapsed_ms: u64,
 }
@@ -114,6 +118,7 @@ impl AuditLog {
             outcome = line.outcome,
             error_kind = line.error_kind.as_deref(),
             caller = line.caller.as_deref(),
+            subject = line.subject.as_deref(),
             elapsed_ms = line.elapsed_ms,
             "tool write"
         );
@@ -173,6 +178,9 @@ fn request_policy(ctx: &RequestContext<RoleServer>) -> Option<ToolPolicy> {
 /// sent directly; the static token leaves neither.
 fn caller(ctx: &RequestContext<RoleServer>) -> Option<String> {
     let parts = parts(ctx)?;
+    if let Some(c) = parts.extensions.get::<Caller>() {
+        return Some(c.audit_label());
+    }
     Some(match parts.extensions.get::<Claims>() {
         Some(claims) => match &claims.payload.client_id {
             Some(id) => format!("oauth:{id}"),
@@ -379,6 +387,9 @@ impl<S: ServerHandler> ServerHandler for Guarded<S> {
         }
         let tool = request.name.to_string();
         let caller = caller(&context);
+        let subject = parts(&context)
+            .and_then(|p| p.extensions.get::<Caller>())
+            .map(|c| c.subject.clone());
         let started = Instant::now();
         let (outcome, error_kind, response) = if policy.read_only {
             let text = format!(
@@ -400,6 +411,7 @@ impl<S: ServerHandler> ServerHandler for Guarded<S> {
             outcome,
             error_kind,
             caller,
+            subject,
             elapsed_ms: started.elapsed().as_millis() as u64,
         });
         response
@@ -509,6 +521,7 @@ mod tests {
             outcome: "ok",
             error_kind: None,
             caller: Some("static".into()),
+            subject: Some("static".into()),
             elapsed_ms: 1,
         }
     }

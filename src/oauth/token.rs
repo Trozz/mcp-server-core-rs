@@ -61,29 +61,44 @@ fn granted_service(
         .ok_or(("invalid_target", "resource is not a service on this server"))
 }
 
-/// Issues an access and a refresh token, carrying the person's sealed credential when there is one.
-fn issue_pair(
-    st: &AuthState,
-    client_id: String,
-    service: String,
+/// Who a grant is for and when they signed in, carried from the code to every token after it.
+struct Grant {
+    subject: String,
+    auth_time: u64,
     credential: Option<String>,
-) -> Response {
+}
+
+/// Issues an access and a refresh token for `grant`. The refresh token never outlives the grant.
+fn issue_pair(st: &AuthState, client_id: String, service: String, grant: Grant) -> Response {
     let resource = st.resource(&service);
     let payload = Payload {
         client_id: Some(client_id),
         scope: Some(service.clone()),
         resource: Some(resource.clone()),
-        credential,
+        credential: grant.credential,
+        ver: Some(st.sign_in_version().to_string()),
+        auth_time: Some(grant.auth_time),
         ..Default::default()
     };
+    let now = jsonwebtoken::get_current_timestamp();
+    let grant_left = (grant.auth_time + super::MAX_GRANT_AGE.as_secs()).saturating_sub(now);
+    let refresh_ttl = REFRESH_TTL.min(Duration::from_secs(grant_left));
+    let audience = st.settings.public_url.clone();
     let (Ok(access), Ok(refresh)) = (
-        st.jwt.issue_for(
+        st.jwt.issue_as(
             TokenKind::Access,
             Some(ACCESS_TTL),
             payload.clone(),
             &resource,
+            &grant.subject,
         ),
-        st.jwt.issue(TokenKind::Refresh, Some(REFRESH_TTL), payload),
+        st.jwt.issue_as(
+            TokenKind::Refresh,
+            Some(refresh_ttl),
+            payload,
+            &audience,
+            &grant.subject,
+        ),
     ) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "token error").into_response();
     };
@@ -142,11 +157,19 @@ fn authorization_code(st: &AuthState, req: &TokenRequest) -> Response {
     let Ok(credential) = sealed_credential(st, p.credential.as_deref()) else {
         return oauth_error("invalid_grant", "grant has no credential");
     };
+    if !st.grant_is_current(&claims) {
+        return oauth_error("invalid_grant", "sign in again");
+    }
     if !st.replay.first_use(&claims.jti, claims.exp.unwrap_or(0)) {
         tracing::warn!("authorization code replay rejected");
         return oauth_error("invalid_grant", "code already used");
     }
-    issue_pair(st, client_id.clone(), service, credential)
+    let grant = Grant {
+        subject: claims.sub.clone(),
+        auth_time: p.auth_time.unwrap_or_default(),
+        credential,
+    };
+    issue_pair(st, client_id.clone(), service, grant)
 }
 
 /// The sealed credential a grant passes on: when credentials are carried it must be present and
@@ -193,7 +216,15 @@ fn refresh(st: &AuthState, req: &TokenRequest) -> Response {
     let Ok(credential) = sealed_credential(st, claims.payload.credential.as_deref()) else {
         return oauth_error("invalid_grant", "grant has no credential");
     };
-    issue_pair(st, client_id, service, credential)
+    if !st.grant_is_current(&claims) {
+        return oauth_error("invalid_grant", "sign in again");
+    }
+    let grant = Grant {
+        subject: claims.sub.clone(),
+        auth_time: claims.payload.auth_time.unwrap_or_default(),
+        credential,
+    };
+    issue_pair(st, client_id, service, grant)
 }
 
 pub async fn token(State(st): State<Arc<AuthState>>, Form(req): Form<TokenRequest>) -> Response {

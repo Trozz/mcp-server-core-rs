@@ -13,6 +13,15 @@ use tower_http::trace::TraceLayer;
 /// Largest request body accepted, in bytes.
 pub const BODY_LIMIT: usize = 1024 * 1024;
 
+/// Adds `X-Content-Type-Options: nosniff` to every response.
+async fn nosniff(mut res: Response) -> Response {
+    res.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    res
+}
+
 /// Counts requests by matched route and status in `http_requests_total`.
 pub async fn http_metrics(req: Request, next: Next) -> Response {
     let route = req
@@ -45,6 +54,7 @@ pub fn build_app(auth: Arc<AuthState>, services: Vec<(&'static str, Router)>) ->
         app = app.nest_service(&format!("/{name}"), router.layer(guard));
     }
     app
+        .layer(middleware::map_response(nosniff))
         .layer(middleware::from_fn(http_metrics))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(BODY_LIMIT))

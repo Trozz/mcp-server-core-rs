@@ -35,7 +35,31 @@ copy of this code.
 - MCP prompts: each service's prompts are offered on `/mcp` as `<service>_<prompt>`, and
   `prompt::tool_prefix` lets a prompt name tools as the endpoint calls them (from mcp-icloud).
 
+- `caller::Caller` on every authenticated request (who signed in and how), recorded in the audit
+  log as `subject`, and `Server::wrap_router` to add your own layers.
+- Tokens carry who signed in (`sub`), a keyed sign-in version (`ver`) and the sign-in time
+  (`auth_time`): changing the owner's password or the sign-in mode ends every earlier grant, and a
+  grant ends 90 days after sign-in however often it is refreshed.
+- Authorization responses carry `iss` (RFC 9207). Client registration is capped (10 redirect URIs
+  of up to 2048 bytes, a client name of up to 200 characters). Every response sends
+  `X-Content-Type-Options: nosniff`, and HSTS when the server terminates TLS.
+- At most 60 new credential checks start a minute, so fresh addresses cannot turn the server into
+  an amplifier against the upstream service.
+
 ### Changed, compared with the copies in the two servers
+
+- Tokens issued before this version lack the new claims, so everyone signs in once more after
+  upgrading.
+- Junk bearer tokens on a server without a static token are refused without counting towards the
+  sign-in limits, so they cannot lock the owner out; a static token is refused at startup next to
+  a verifier that takes bearer credentials, or when shaped like a JWT.
+- A credential that has the shape of a JWT but was not issued here is checked as a credential;
+  this server's own tokens, even expired, are never sent upstream.
+- More than one enabled service defining how people sign in is a startup error, as is an owner's
+  password of only spaces. A short password or static token is warned about.
+- `X-Forwarded-For` entries with a port are understood.
+- `SignIn`, `CredentialCheck`, `Ceiling`, `TlsMode`, `TokenKind`, `JwtError`, `SealError` and
+  `app::Loaded` are `#[non_exhaustive]`, so later versions can add to them.
 
 - Wrong static tokens count towards the sign-in limits, and a blocked address cannot use the
   static token until the limit clears, so `MCP_AUTH_TOKEN` cannot be guessed. Expired or foreign
@@ -46,5 +70,10 @@ copy of this code.
 - Successful sign-in answers `303 See Other` (RFC 9700), not `302 Found`.
 - The owner's password is compared exactly as typed; credentials for upstream services are trimmed.
 - Random token ids no longer need the `uuid` crate.
+
+### Planned
+
+- Client ID Metadata Documents, which the MCP authorization spec now prefers to dynamic client
+  registration.
 
 [0.1.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.1.0

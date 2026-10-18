@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 /// How the server listens.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TlsMode {
     /// Plain HTTP (`INSECURE_HTTP`), behind a proxy that terminates TLS.
     Insecure,

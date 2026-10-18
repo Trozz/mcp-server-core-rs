@@ -69,6 +69,13 @@ pub const BEARER_INVALID_FOR: Duration = Duration::from_secs(60);
 const BEARER_CACHE_ENTRIES: usize = 10_000;
 /// Credential checks allowed to run at once, across sign-ins and bearer credentials.
 pub const MAX_RUNNING_CHECKS: usize = 16;
+/// Credential checks that may start per [`LOGIN_WINDOW`], across every address. Credentials
+/// already checked (cached) and issued tokens are not affected; past the cap new credentials are
+/// answered "unavailable, try again" instead of being sent upstream.
+pub const MAX_NEW_CHECKS: usize = 60;
+/// Longest a grant lasts after the person signed in, however often it is refreshed. Then they
+/// sign in again.
+pub const MAX_GRANT_AGE: Duration = Duration::from_secs(90 * 24 * 3600);
 /// Longest a credential check may take before it counts as unavailable.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest a check waits for a free slot when [`MAX_RUNNING_CHECKS`] are already running.
@@ -93,6 +100,43 @@ pub struct AuthState {
     /// Runs credential checks: shared per credential, capped and timed out.
     pub(crate) checks: CheckRunner,
     services: Vec<String>,
+    sign_in_version: String,
+}
+
+/// Why the static token cannot be used with a verifier, if it cannot.
+pub(crate) fn static_token_problem(
+    token: &str,
+    verifier: &dyn CredentialVerifier,
+) -> Option<String> {
+    if verifier.carried() || verifier.accepts_bearer() {
+        return Some(format!(
+            "MCP_AUTH_TOKEN cannot be used when people sign in with their own {}",
+            verifier.label()
+        ));
+    }
+    if token.split('.').count() == 3 {
+        return Some(
+            "MCP_AUTH_TOKEN must not have the shape of a JWT (three dot-separated parts)".into(),
+        );
+    }
+    None
+}
+
+/// The keyed hash tokens carry as `ver`: of the sign-in mode and the verifier's generation.
+fn sign_in_version(signing_key: &[u8], verifier: &dyn CredentialVerifier) -> String {
+    use base64::Engine as _;
+    use ring::hmac;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, signing_key);
+    let mut ctx = hmac::Context::with_key(&key);
+    ctx.update(b"mcp-server-core sign-in v1\0");
+    ctx.update(if verifier.carried() {
+        b"carried\0"
+    } else {
+        b"password\0"
+    });
+    ctx.update(verifier.generation());
+    let tag = ctx.sign();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&tag.as_ref()[..16])
 }
 
 impl AuthState {
@@ -103,17 +147,20 @@ impl AuthState {
     ///
     /// # Panics
     ///
-    /// If `settings.static_token` is set while `verifier` carries credentials: such requests
-    /// would reach tools without the credential they expect.
+    /// If `settings.static_token` is set while `verifier` carries credentials or accepts them as
+    /// bearer tokens (requests made with it would lack the credential tools expect, and wrong
+    /// tokens could be tried as credentials without limit), or when the static token has the shape
+    /// of a JWT. [`Server::load`](crate::app::Server::load) reports these as configuration errors.
     pub fn new(
         settings: OAuthSettings,
         services: &[&str],
         verifier: Arc<dyn CredentialVerifier>,
     ) -> Arc<Self> {
-        assert!(
-            settings.static_token.is_none() || !verifier.carried(),
-            "a static token cannot be used when people sign in with their own credential"
-        );
+        if let Some(token) = &settings.static_token
+            && let Some(problem) = static_token_problem(token.expose_secret(), verifier.as_ref())
+        {
+            panic!("{problem}");
+        }
         let key = settings.signing_key.expose_secret().as_bytes();
         let jwt = Jwt::new(
             key,
@@ -121,6 +168,7 @@ impl AuthState {
             settings.public_url.clone(),
         );
         let sealer = Sealer::new(key);
+        let sign_in_version = sign_in_version(key, verifier.as_ref());
         // One shared secret (the owner's password, the static token) is worth a lockout of
         // everyone during a distributed attack; with per-person credentials it is not.
         let ceiling = if verifier.carried() {
@@ -140,9 +188,41 @@ impl AuthState {
                 BEARER_INVALID_FOR,
                 BEARER_CACHE_ENTRIES,
             ),
-            checks: CheckRunner::new(MAX_RUNNING_CHECKS, CHECK_TIMEOUT, CHECK_SLOT_WAIT),
+            checks: CheckRunner::with_rate(
+                MAX_RUNNING_CHECKS,
+                CHECK_TIMEOUT,
+                CHECK_SLOT_WAIT,
+                MAX_NEW_CHECKS,
+                LOGIN_WINDOW,
+            ),
             services: services.iter().map(|s| s.to_string()).collect(),
+            sign_in_version,
         })
+    }
+
+    /// The `ver` every code, access and refresh token must carry: a keyed hash of the sign-in mode
+    /// and the verifier's [generation](CredentialVerifier::generation). Changing the owner's
+    /// password, switching between sign-in modes or rotating `OAUTH_SIGNING_KEY` changes it and so
+    /// ends every earlier grant.
+    pub fn sign_in_version(&self) -> &str {
+        &self.sign_in_version
+    }
+
+    /// Whether a code, access or refresh token's grant still holds: same sign-in version, a
+    /// sealed credential exactly when credentials are carried, and signed in less than
+    /// [`MAX_GRANT_AGE`] ago.
+    pub(crate) fn grant_is_current(&self, claims: &crate::jwt::Claims) -> bool {
+        let p = &claims.payload;
+        let version_ok = p
+            .ver
+            .as_deref()
+            .is_some_and(|v| crate::pkce::ct_eq(v, &self.sign_in_version));
+        let mode_ok = p.credential.is_some() == self.verifier.carried();
+        let now = jsonwebtoken::get_current_timestamp();
+        let fresh = p.auth_time.is_some_and(|t| {
+            t <= now + crate::jwt::LEEWAY_SECS && now - t.min(now) < MAX_GRANT_AGE.as_secs()
+        });
+        version_ok && mode_ok && fresh
     }
 
     /// The settings this server was built with.

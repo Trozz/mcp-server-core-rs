@@ -81,6 +81,7 @@ pub fn fingerprint(secret: &str) -> [u8; 32] {
 
 /// A verifier's verdict on a credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CredentialCheck {
     /// Accepted.
     Valid,
@@ -160,6 +161,27 @@ pub trait CredentialVerifier: Send + Sync + 'static {
     fn accepts_bearer(&self) -> bool {
         self.carried()
     }
+    /// Who signed in with `credential`: the `sub` of their tokens, the audit log's subject and a
+    /// [`Caller`](crate::caller::Caller)'s subject. It must not reveal the credential. Defaults
+    /// to `key:` and the first 16 hex digits of the credential's SHA-256 when credentials are
+    /// carried (one subject per person), and `owner` otherwise.
+    fn subject(&self, credential: &str) -> String {
+        if self.carried() {
+            let hex: String = fingerprint(credential)[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            format!("key:{hex}")
+        } else {
+            "owner".to_string()
+        }
+    }
+    /// Bytes that change whenever every earlier sign-in should end, such as a hash of the
+    /// password. Tokens carry a keyed hash of them, so a change signs everyone out. Defaults to
+    /// none.
+    fn generation(&self) -> &[u8] {
+        &[]
+    }
 }
 
 /// Whether `s` has the shape of a credential: non-empty, at most [`MAX_CREDENTIAL_LEN`] bytes,
@@ -177,12 +199,21 @@ pub const MAX_PASSWORD_LEN: usize = 1024;
 /// builds from `OAUTH_ADMIN_PASSWORD`.
 pub struct PasswordVerifier {
     password: SecretString,
+    generation: [u8; 32],
 }
 
 impl PasswordVerifier {
-    /// Accepts exactly `password`.
+    /// Accepts exactly `password`. Changing it signs everyone out.
     pub fn new(password: SecretString) -> Self {
-        PasswordVerifier { password }
+        let generation = Sha256::new()
+            .chain_update(b"mcp-server-core owner password\0")
+            .chain_update(password.expose_secret().as_bytes())
+            .finalize()
+            .into();
+        PasswordVerifier {
+            password,
+            generation,
+        }
     }
 }
 
@@ -219,10 +250,15 @@ impl CredentialVerifier for PasswordVerifier {
     fn carried(&self) -> bool {
         false
     }
+
+    fn generation(&self) -> &[u8] {
+        &self.generation
+    }
 }
 
 /// Why a credential could not be sealed or opened.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SealError {
     /// The random nonce or the encryption failed.
     #[error("sealing failed")]
@@ -367,6 +403,11 @@ pub(crate) struct CheckRunner {
     timeout: Duration,
     wait: Duration,
     running: Mutex<HashMap<[u8; 32], watch::Receiver<Option<CredentialCheck>>>>,
+    /// At most this many checks start per `window`, across every address: new credentials from
+    /// fresh addresses cannot turn the server into an amplifier against the upstream service.
+    started: Mutex<std::collections::VecDeque<Instant>>,
+    max_started: usize,
+    window: Duration,
 }
 
 /// How a request takes part in a credential check.
@@ -384,13 +425,51 @@ pub(crate) struct Lead {
 }
 
 impl CheckRunner {
+    #[cfg(test)]
     pub fn new(max_running: usize, timeout: Duration, wait: Duration) -> Self {
+        Self::with_rate(
+            max_running,
+            timeout,
+            wait,
+            usize::MAX,
+            Duration::from_secs(60),
+        )
+    }
+
+    /// Like [`new`](Self::new), starting at most `max_started` checks per `window`.
+    pub fn with_rate(
+        max_running: usize,
+        timeout: Duration,
+        wait: Duration,
+        max_started: usize,
+        window: Duration,
+    ) -> Self {
         CheckRunner {
             permits: Semaphore::new(max_running),
             timeout,
             wait,
             running: Mutex::new(HashMap::new()),
+            started: Mutex::new(std::collections::VecDeque::new()),
+            max_started,
+            window,
         }
+    }
+
+    /// Takes a start from the window's allowance; `false` when it is used up.
+    fn take_start(&self) -> bool {
+        let now = Instant::now();
+        let mut started = self.started.lock().unwrap_or_else(|e| e.into_inner());
+        while started
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= self.window)
+        {
+            started.pop_front();
+        }
+        if started.len() >= self.max_started {
+            return false;
+        }
+        started.push_back(now);
+        true
     }
 
     /// Joins the check of the credential with this fingerprint: as its lead when none is
@@ -415,6 +494,13 @@ impl CheckRunner {
         verifier: &dyn CredentialVerifier,
         credential: &str,
     ) -> CredentialCheck {
+        if !self.take_start() {
+            let verdict = CredentialCheck::Unavailable(
+                "the server is checking too many new credentials; try again in a minute".into(),
+            );
+            self.finish(lead, verdict.clone());
+            return verdict;
+        }
         let verdict = match tokio::time::timeout(self.wait, self.permits.acquire()).await {
             Ok(Ok(_permit)) => {
                 match tokio::time::timeout(self.timeout, verifier.check(credential)).await {
@@ -701,6 +787,52 @@ mod tests {
             CredentialCheck::Unavailable(_)
         ));
         assert!(matches!(runner.join(fingerprint("k")), Ticket::Lead(_)));
+    }
+
+    #[tokio::test]
+    async fn checks_started_per_window_are_capped() {
+        let runner = CheckRunner::with_rate(
+            4,
+            Duration::from_secs(5),
+            Duration::ZERO,
+            2,
+            Duration::from_millis(200),
+        );
+        let v = slow(1);
+        for key in ["a", "b"] {
+            assert_eq!(runner.check(&v, key).await, CredentialCheck::Invalid(None));
+        }
+        assert!(matches!(
+            runner.check(&v, "c").await,
+            CredentialCheck::Unavailable(m) if m.contains("too many new credentials")
+        ));
+        assert_eq!(v.checks.load(std::sync::atomic::Ordering::SeqCst), 2);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(runner.check(&v, "c").await, CredentialCheck::Invalid(None));
+    }
+
+    #[test]
+    fn subjects_name_the_person_without_revealing_the_credential() {
+        struct Key;
+        impl CredentialVerifier for Key {
+            fn label(&self) -> &str {
+                "key"
+            }
+            fn check<'a>(&'a self, _: &'a str) -> CheckFuture<'a> {
+                Box::pin(async { CredentialCheck::Valid })
+            }
+        }
+        let s = Key.subject("secret-key-1");
+        assert!(s.starts_with("key:") && s.len() == 20, "{s}");
+        assert!(!s.contains("secret"));
+        assert_ne!(s, Key.subject("secret-key-2"));
+        assert_eq!(s, Key.subject("secret-key-1"));
+        assert!(Key.generation().is_empty());
+        let owner = PasswordVerifier::new("a long password".to_string().into());
+        assert_eq!(owner.subject("a long password"), "owner");
+        let other = PasswordVerifier::new("another password".to_string().into());
+        assert_ne!(owner.generation(), other.generation());
+        assert_eq!(owner.generation().len(), 32);
     }
 
     #[tokio::test]
