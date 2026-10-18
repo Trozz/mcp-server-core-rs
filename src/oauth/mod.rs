@@ -122,8 +122,10 @@ pub(crate) fn static_token_problem(
     None
 }
 
-/// The keyed hash tokens carry as `ver`: of the sign-in mode and the verifier's generation.
-fn sign_in_version(signing_key: &[u8], verifier: &dyn CredentialVerifier) -> String {
+/// The sign-in version tokens carry as `ver`: a keyed hash of the sign-in mode and the verifier's
+/// [generation](CredentialVerifier::generation) under `signing_key`. The same as
+/// [`AuthState::sign_in_version`]; useful for minting tokens in tests.
+pub fn sign_in_version(signing_key: &[u8], verifier: &dyn CredentialVerifier) -> String {
     use base64::Engine as _;
     use ring::hmac;
     let key = hmac::Key::new(hmac::HMAC_SHA256, signing_key);
