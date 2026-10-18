@@ -133,13 +133,14 @@ fn looks_like_jwt(token: &str) -> bool {
 /// - the static token (`MCP_AUTH_TOKEN`), when one is configured;
 /// - when the verifier [accepts bearer credentials](crate::credential::CredentialVerifier::accepts_bearer),
 ///   the person's credential itself, checked with the verifier (the verdict is cached briefly
-///   under its fingerprint) and added as a [`Credential`] extension.
+///   under its fingerprint) and, when the verifier carries credentials, added as a
+///   [`Credential`] extension.
 ///
 /// Every request let through gets a [`Caller`] extension; one with an OAuth token also gets its
 /// [`Claims`](crate::jwt::Claims). Anything else gets 401 with a `WWW-Authenticate` header naming
 /// the service's resource metadata, as MCP clients expect. Wrong static tokens and rejected
-/// credentials count towards the per-address sign-in limit; tokens this server issued never do,
-/// even expired ones, and are never sent upstream.
+/// credentials count towards the sign-in limits; tokens this server issued never do, even expired
+/// ones, and are never sent upstream.
 pub async fn require_bearer(
     State((st, service)): State<(Arc<AuthState>, String)>,
     mut req: Request,
@@ -273,7 +274,7 @@ pub async fn require_bearer(
             }
         }
     }
-    let subject = st.verifier.subject(&token);
+    let subject = st.subject_of(&token);
     req.extensions_mut()
         .insert(Caller::new(subject, Via::Credential));
     if st.verifier.carried() {

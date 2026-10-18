@@ -37,14 +37,16 @@ copy of this code.
 
 - `caller::Caller` on every authenticated request (who signed in and how), recorded in the audit
   log as `subject`, and `Server::wrap_router` to add your own layers.
-- Tokens carry who signed in (`sub`), a keyed sign-in version (`ver`) and the sign-in time
-  (`auth_time`): changing the owner's password or the sign-in mode ends every earlier grant, and a
-  grant ends 90 days after sign-in however often it is refreshed.
+- Tokens carry who signed in (`sub`), a keyed sign-in version (`ver`, from the sign-in mode, the
+  verifier's label and its `generation`) and the sign-in time (`auth_time`): changing the owner's
+  password, the sign-in mode or the verifier ends every earlier grant, and a grant ends 90 days
+  after sign-in however often it is refreshed; neither its access nor its refresh token outlives
+  it. A person signing in with their own credential is named `key:` and a short hash keyed by
+  `OAUTH_SIGNING_KEY` (`AuthState::subject_of`; a verifier can name them itself).
 - Authorization responses carry `iss` (RFC 9207). Client registration is capped (10 redirect URIs
-  of up to 2048 bytes, a client name of up to 200 characters). Every response sends
-  `X-Content-Type-Options: nosniff`, and HSTS when the server terminates TLS.
-- At most 60 new credential checks start a minute, so fresh addresses cannot turn the server into
-  an amplifier against the upstream service.
+  of up to 2048 bytes, a client name of up to 200 characters). Malformed `/token` and `/register`
+  requests get OAuth JSON errors (400). Every response sends `X-Content-Type-Options: nosniff`,
+  and HSTS when the server serves certificate files.
 - A limit per wider block (IPv4 /24, IPv6 /48) of 25 attempts a minute next to the per-address
   one, so one allocation cannot spread guesses over thousands of addresses. Attempts still being
   checked count towards both, never towards the global ceiling. When 10,000 addresses are tracked,
@@ -61,22 +63,25 @@ copy of this code.
 
 - Tokens issued before this version lack the new claims, so everyone signs in once more after
   upgrading.
-- Junk bearer tokens on a server without a static token are refused without counting towards the
-  sign-in limits, so they cannot lock the owner out; a static token is refused at startup next to
-  a verifier that takes bearer credentials, or when shaped like a JWT.
+- On an owner's-password server without a static token, bearer tokens that are not this server's
+  are refused without counting towards the sign-in limits, so they cannot lock the owner out. A
+  static token is refused at startup next to a verifier that takes bearer credentials, or when
+  shaped like a JWT, reported with every other configuration error.
 - A credential that has the shape of a JWT but was not issued here is checked as a credential;
   this server's own tokens, even expired, are never sent upstream.
 - More than one enabled service defining how people sign in is a startup error, as is an owner's
   password of only spaces. A short password or static token is warned about.
-- `X-Forwarded-For` entries with a port are understood.
+- `X-Forwarded-For` entries with a port are understood, and IPv4-mapped IPv6 addresses
+  (`::ffff:10.0.0.1`, as a dual-stack listener reports IPv4 peers) match `TRUSTED_PROXIES` and
+  share limits with the IPv4 address.
 - Log caps (`Service::log_caps`) never raise a target above `LOG_LEVEL`, and the audit target stays
   on at `info` whatever the level.
 - `SignIn`, `CredentialCheck`, `Ceiling`, `TlsMode`, `TokenKind`, `JwtError`, `SealError` and
   `app::Loaded` are `#[non_exhaustive]`, so later versions can add to them.
 
 - Wrong static tokens count towards the sign-in limits, and a blocked address cannot use the
-  static token until the limit clears, so `MCP_AUTH_TOKEN` cannot be guessed. Expired or foreign
-  OAuth tokens never count.
+  static token until the limit clears, so `MCP_AUTH_TOKEN` cannot be guessed. This server's own
+  tokens, even expired, never count.
 - The global sign-in ceiling depends on how people sign in: with the owner's password it blocks
   everyone (as mcp-icloud did); with per-person credentials only addresses that failed themselves
   (as mcp-companies-house did). See `guards::Ceiling`.

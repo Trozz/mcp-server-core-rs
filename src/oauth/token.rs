@@ -2,6 +2,7 @@ use super::AuthState;
 use crate::jwt::{Payload, TokenKind};
 use crate::pkce;
 use axum::Json;
+use axum::extract::rejection::FormRejection;
 use axum::extract::{Form, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -68,7 +69,7 @@ struct Grant {
     credential: Option<String>,
 }
 
-/// Issues an access and a refresh token for `grant`. The refresh token never outlives the grant.
+/// Issues an access and a refresh token for `grant`. Neither outlives the grant.
 fn issue_pair(st: &AuthState, client_id: String, service: String, grant: Grant) -> Response {
     let resource = st.resource(&service);
     let payload = Payload {
@@ -81,13 +82,19 @@ fn issue_pair(st: &AuthState, client_id: String, service: String, grant: Grant) 
         ..Default::default()
     };
     let now = jsonwebtoken::get_current_timestamp();
-    let grant_left = (grant.auth_time + super::MAX_GRANT_AGE.as_secs()).saturating_sub(now);
-    let refresh_ttl = REFRESH_TTL.min(Duration::from_secs(grant_left));
+    let grant_left = Duration::from_secs(
+        grant
+            .auth_time
+            .saturating_add(super::MAX_GRANT_AGE.as_secs())
+            .saturating_sub(now),
+    );
+    let access_ttl = ACCESS_TTL.min(grant_left);
+    let refresh_ttl = REFRESH_TTL.min(grant_left);
     let audience = st.settings.public_url.clone();
     let (Ok(access), Ok(refresh)) = (
         st.jwt.issue_as(
             TokenKind::Access,
-            Some(ACCESS_TTL),
+            Some(access_ttl),
             payload.clone(),
             &resource,
             &grant.subject,
@@ -108,7 +115,7 @@ fn issue_pair(st: &AuthState, client_id: String, service: String, grant: Grant) 
         Json(json!({
             "access_token": access,
             "token_type": "Bearer",
-            "expires_in": ACCESS_TTL.as_secs(),
+            "expires_in": access_ttl.as_secs(),
             "refresh_token": refresh,
             "scope": service,
         }))
@@ -227,7 +234,20 @@ fn refresh(st: &AuthState, req: &TokenRequest) -> Response {
     issue_pair(st, client_id, service, grant)
 }
 
-pub async fn token(State(st): State<Arc<AuthState>>, Form(req): Form<TokenRequest>) -> Response {
+pub async fn token(
+    State(st): State<Arc<AuthState>>,
+    req: Result<Form<TokenRequest>, FormRejection>,
+) -> Response {
+    let req = match req {
+        Ok(Form(req)) => req,
+        Err(r) if r.status() == StatusCode::PAYLOAD_TOO_LARGE => return r.into_response(),
+        Err(_) => {
+            return oauth_error(
+                "invalid_request",
+                "send a form with grant_type and each parameter at most once",
+            );
+        }
+    };
     match req.grant_type.as_str() {
         "authorization_code" => authorization_code(&st, &req),
         "refresh_token" => refresh(&st, &req),

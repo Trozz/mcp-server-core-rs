@@ -12,7 +12,7 @@
 //! |---|---|---|
 //! | `PUBLIC_URL` | required | External `https://` URL clients use, without a path. `http://` only for `localhost`. |
 //! | `OAUTH_SIGNING_KEY` | required | At least 32 bytes. Signs every token; changing it signs everyone out. |
-//! | `MCP_AUTH_TOKEN` | none | A fixed bearer token for clients that cannot do OAuth, when people do not sign in with their own credential. |
+//! | `MCP_AUTH_TOKEN` | none | A fixed bearer token for clients that cannot do OAuth: not when people sign in with their own credential or send it as a bearer token, and not shaped like a JWT (three dot-separated parts). |
 //! | `TRUSTED_PROXIES` | none | Comma-separated proxy IPs whose `X-Forwarded-For` is believed for rate limiting. |
 //! | `ALLOWED_ORIGINS` | none | Extra browser origins allowed to call the MCP endpoints. |
 //! | `BIND_ADDR` | `0.0.0.0:8443` | Listen address. |

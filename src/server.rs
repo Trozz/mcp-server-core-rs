@@ -53,12 +53,12 @@ pub fn build_app(auth: Arc<AuthState>, services: Vec<(&'static str, Router)>) ->
             middleware::from_fn_with_state((auth.clone(), name.to_string()), require_bearer);
         app = app.nest_service(&format!("/{name}"), router.layer(guard));
     }
-    app
-        .layer(middleware::map_response(nosniff))
-        .layer(middleware::from_fn(http_metrics))
+    app.layer(middleware::from_fn(http_metrics))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(BODY_LIMIT))
         .layer(TraceLayer::new_for_http().make_span_with(|req: &Request| {
             tracing::info_span!("request", method = %req.method(), path = req.uri().path())
         }))
+        // Outermost, so it reaches refusals from the layers above too, such as 413.
+        .layer(middleware::map_response(nosniff))
 }

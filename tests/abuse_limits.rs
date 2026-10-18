@@ -203,3 +203,47 @@ async fn the_bearer_scheme_is_case_insensitive() {
         assert_eq!(res.status(), StatusCode::OK, "{header}");
     }
 }
+
+#[tokio::test]
+async fn one_network_cannot_spread_checks_over_many_addresses() {
+    let (app, v) = setup();
+    // 300 addresses in one /24, one new key each.
+    for host in 0..300u16 {
+        let peer = [203, 0, 113, (host % 256) as u8];
+        let key = format!("Bearer bad-spread-{host}");
+        app.clone().oneshot(bearer(&key, peer)).await.unwrap();
+    }
+    let checked = v.checks.load(Ordering::SeqCst);
+    assert!(
+        checked <= mcp_server_core::guards::BLOCK_MAX_ATTEMPTS,
+        "{checked} upstream checks from one /24"
+    );
+    // Nobody outside that network is affected, whatever their key.
+    let res = app
+        .clone()
+        .oneshot(bearer(&format!("Bearer {GOOD}"), [198, 51, 100, 7]))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn many_networks_failing_never_lock_out_a_new_key_elsewhere() {
+    let (app, _) = setup();
+    // One junk key from each of 120 networks: more than any global allowance would admit.
+    for net in 0..120u8 {
+        app.clone()
+            .oneshot(bearer(&format!("Bearer bad-net-{net}"), [100, 64, net, 1]))
+            .await
+            .unwrap();
+    }
+    let res = app
+        .oneshot(bearer(&format!("Bearer {GOOD}"), [192, 0, 2, 50]))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "a new valid key still gets in"
+    );
+}

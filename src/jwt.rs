@@ -146,8 +146,9 @@ impl Jwt {
         self.issue_for(typ, ttl, payload, &self.audience)
     }
 
-    /// Issues a token whose `aud` is `audience`, e.g. an access token bound to one resource, with
-    /// [`SERVER_SUBJECT`] as its subject.
+    /// Issues a token whose `aud` is `audience`, with [`SERVER_SUBJECT`] as its subject. Access
+    /// tokens for people come from [`issue_as`](Self::issue_as) with their subject, and need the
+    /// grant's `ver` and `auth_time` in `payload` to be accepted.
     pub fn issue_for(
         &self,
         typ: TokenKind,

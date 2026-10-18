@@ -6,7 +6,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::post;
 use mcp_server_core::caller::{Caller, Via};
-use mcp_server_core::credential::PasswordVerifier;
+use mcp_server_core::credential::{
+    CheckFuture, CredentialCheck, CredentialVerifier, PasswordVerifier,
+};
 use mcp_server_core::jwt::{Payload, TokenKind};
 use mcp_server_core::oauth::{AuthState, MAX_GRANT_AGE, OAuthSettings};
 use mcp_server_core::server::build_app;
@@ -181,12 +183,76 @@ async fn tokens_from_per_person_sign_in_are_refused_by_an_owner_server() {
     );
 }
 
+/// A per-person verifier for another upstream service.
+struct OtherUpstream;
+
+impl CredentialVerifier for OtherUpstream {
+    fn label(&self) -> &str {
+        "Other API key"
+    }
+    fn check<'a>(&'a self, _: &'a str) -> CheckFuture<'a> {
+        Box::pin(async { CredentialCheck::Valid })
+    }
+}
+
+#[tokio::test]
+async fn grants_do_not_cross_to_another_upstreams_verifier() {
+    let first = state();
+    let second = state_for(Arc::new(OtherUpstream), &["mail"]);
+    assert_ne!(first.sign_in_version(), second.sign_in_version());
+    let access = first
+        .jwt()
+        .issue_as(
+            TokenKind::Access,
+            Some(Duration::from_secs(60)),
+            grant(&first),
+            &first.resource("mail"),
+            "key:0123456789abcdef",
+        )
+        .unwrap();
+    assert_eq!(
+        send(&echo_app(second), bearer(&access)).await.status(),
+        StatusCode::UNAUTHORIZED,
+        "the first upstream's key is never handed to the second's tools"
+    );
+}
+
+#[test]
+fn default_subjects_are_keyed_by_the_signing_key() {
+    use sha2::Digest as _;
+    let st = state();
+    let subject = st.subject_of(KEY);
+    assert!(
+        subject.starts_with("key:") && subject.len() == 20,
+        "{subject}"
+    );
+    assert_eq!(subject, st.subject_of(KEY));
+    assert_ne!(subject, st.subject_of("another-key"));
+    let unkeyed: String = sha2::Sha256::digest(KEY)[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_ne!(subject, format!("key:{unkeyed}"), "not a plain hash");
+    let other_key = AuthState::new(
+        OAuthSettings {
+            public_url: PUBLIC_URL.into(),
+            signing_key: "another signing key, 32 bytes long".to_string().into(),
+            trusted_proxies: Vec::new(),
+            static_token: None,
+        },
+        &["mail"],
+        verifier(),
+    );
+    assert_ne!(subject, other_key.subject_of(KEY));
+    assert_eq!(owner_with("a long password here").subject_of("x"), "owner");
+}
+
 #[tokio::test]
 async fn grants_end_a_fixed_time_after_sign_in_however_often_they_are_refreshed() {
     let st = state();
     let cid = client(&st);
     let app = echo_app(st.clone());
-    let signed_in = jsonwebtoken_now() - MAX_GRANT_AGE.as_secs() + 3600;
+    let signed_in = jsonwebtoken_now() - MAX_GRANT_AGE.as_secs() + 1800;
     let near_the_end = Payload {
         auth_time: Some(signed_in),
         ..grant(&st)
@@ -203,9 +269,19 @@ async fn grants_end_a_fixed_time_after_sign_in_however_often_they_are_refreshed(
     let claims = st.jwt().verify(refresh_token, TokenKind::Refresh).unwrap();
     let left = claims.exp.unwrap() - jsonwebtoken_now();
     assert!(
-        left <= 3600,
+        left <= 1800,
         "the refresh token ends with the grant: {left}s"
     );
+    let expires_in = tokens["expires_in"].as_u64().unwrap();
+    assert!(
+        expires_in <= 1800,
+        "so does the access token: {expires_in}s"
+    );
+    let access = st
+        .jwt()
+        .verify(tokens["access_token"].as_str().unwrap(), TokenKind::Access)
+        .map(|c| c.exp.unwrap() - jsonwebtoken_now());
+    assert!(access.is_err() || access.unwrap() <= 1800);
     assert_eq!(claims.payload.auth_time, Some(signed_in));
     assert_eq!(claims.sub, "key:x");
 
@@ -408,4 +484,52 @@ async fn a_static_token_is_refused_next_to_a_verifier_that_takes_bearer_credenti
         &["mail"],
         Arc::new(Lenient),
     );
+}
+
+#[tokio::test]
+async fn malformed_token_and_registration_requests_get_oauth_errors() {
+    let st = state();
+    let app = oauth_router(st.clone());
+    let cid = client(&st);
+    for req in [
+        form_post("/token", &[("code", "x")]),
+        form_post(
+            "/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", "a"),
+                ("code", "b"),
+                ("client_id", &cid),
+            ],
+        ),
+        json_post("/token", json!({"grant_type": "refresh_token"})),
+    ] {
+        let res = send(&app, req).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(res.headers()["cache-control"], "no-store");
+        assert_eq!(body_json(res).await["error"], "invalid_request");
+    }
+    let bad_json = Request::post("/register")
+        .header("content-type", "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let res = send(&app, bad_json).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn a_sign_in_time_slightly_ahead_is_another_replicas_clock() {
+    let st = state();
+    let cid = client(&st);
+    let ahead = Payload {
+        auth_time: Some(jsonwebtoken_now() + 30),
+        ..grant(&st)
+    };
+    let res = send(
+        &echo_app(st.clone()),
+        exchange(&code(&st, &cid, "key:x", ahead), &cid),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
 }

@@ -25,7 +25,9 @@ mod token;
 
 pub use authorize::client_ip;
 pub use middleware::require_bearer;
-pub use register::validate_redirect_uri;
+pub use register::{
+    MAX_CLIENT_NAME_CHARS, MAX_REDIRECT_URI_LEN, MAX_REDIRECT_URIS, validate_redirect_uri,
+};
 
 use crate::credential::{CheckCache, CheckRunner, CredentialVerifier, Sealer};
 use crate::guards::{Ceiling, LoginLimiter, ReplayGuard};
@@ -69,10 +71,6 @@ pub const BEARER_INVALID_FOR: Duration = Duration::from_secs(60);
 const BEARER_CACHE_ENTRIES: usize = 10_000;
 /// Credential checks allowed to run at once, across sign-ins and bearer credentials.
 pub const MAX_RUNNING_CHECKS: usize = 16;
-/// Credential checks that may start per [`LOGIN_WINDOW`], across every address. Credentials
-/// already checked (cached) and issued tokens are not affected; past the cap new credentials are
-/// answered "unavailable, try again" instead of being sent upstream.
-pub const MAX_NEW_CHECKS: usize = 60;
 /// Longest a grant lasts after the person signed in, however often it is refreshed. Then they
 /// sign in again.
 pub const MAX_GRANT_AGE: Duration = Duration::from_secs(90 * 24 * 3600);
@@ -101,6 +99,9 @@ pub struct AuthState {
     pub(crate) checks: CheckRunner,
     services: Vec<String>,
     sign_in_version: String,
+    /// Keys the default subject of carried credentials, so a subject cannot be used to guess
+    /// the credential offline.
+    subject_key: ring::hmac::Key,
 }
 
 /// Why the static token cannot be used with a verifier, if it cannot.
@@ -108,23 +109,29 @@ pub(crate) fn static_token_problem(
     token: &str,
     verifier: &dyn CredentialVerifier,
 ) -> Option<String> {
-    if verifier.carried() || verifier.accepts_bearer() {
-        return Some(format!(
-            "MCP_AUTH_TOKEN cannot be used when people sign in with their own {}",
-            verifier.label()
-        ));
-    }
-    if token.split('.').count() == 3 {
-        return Some(
-            "MCP_AUTH_TOKEN must not have the shape of a JWT (three dot-separated parts)".into(),
-        );
-    }
-    None
+    static_token_verifier_problem(verifier).or_else(|| static_token_shape_problem(token))
 }
 
-/// The sign-in version tokens carry as `ver`: a keyed hash of the sign-in mode and the verifier's
-/// [generation](CredentialVerifier::generation) under `signing_key`. The same as
-/// [`AuthState::sign_in_version`]; useful for minting tokens in tests.
+/// Why no static token can be used next to `verifier`, if none can.
+pub(crate) fn static_token_verifier_problem(verifier: &dyn CredentialVerifier) -> Option<String> {
+    (verifier.carried() || verifier.accepts_bearer()).then(|| {
+        format!(
+            "MCP_AUTH_TOKEN cannot be used when people sign in with their own {}",
+            verifier.label()
+        )
+    })
+}
+
+/// Why `token` cannot be a static token whatever the verifier, if it cannot.
+pub(crate) fn static_token_shape_problem(token: &str) -> Option<String> {
+    (token.split('.').count() == 3).then(|| {
+        "MCP_AUTH_TOKEN must not have the shape of a JWT (three dot-separated parts)".into()
+    })
+}
+
+/// The sign-in version tokens carry as `ver`: a keyed hash of the sign-in mode, the verifier's
+/// [label](CredentialVerifier::label) and its [generation](CredentialVerifier::generation) under
+/// `signing_key`. The same as [`AuthState::sign_in_version`]; useful for minting tokens in tests.
 pub fn sign_in_version(signing_key: &[u8], verifier: &dyn CredentialVerifier) -> String {
     use base64::Engine as _;
     use ring::hmac;
@@ -136,7 +143,10 @@ pub fn sign_in_version(signing_key: &[u8], verifier: &dyn CredentialVerifier) ->
     } else {
         b"password\0"
     });
-    ctx.update(verifier.generation());
+    for part in [verifier.label().as_bytes(), verifier.generation()] {
+        ctx.update(&(part.len() as u64).to_be_bytes());
+        ctx.update(part);
+    }
     let tag = ctx.sign();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&tag.as_ref()[..16])
 }
@@ -171,6 +181,12 @@ impl AuthState {
         );
         let sealer = Sealer::new(key);
         let sign_in_version = sign_in_version(key, verifier.as_ref());
+        let subject_key = {
+            let mut ctx =
+                ring::hmac::Context::with_key(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key));
+            ctx.update(b"mcp-server-core subject v1");
+            ring::hmac::Key::new(ring::hmac::HMAC_SHA256, ctx.sign().as_ref())
+        };
         // One shared secret (the owner's password, the static token) is worth a lockout of
         // everyone during a distributed attack; with per-person credentials it is not.
         let ceiling = if verifier.carried() {
@@ -190,22 +206,18 @@ impl AuthState {
                 BEARER_INVALID_FOR,
                 BEARER_CACHE_ENTRIES,
             ),
-            checks: CheckRunner::with_rate(
-                MAX_RUNNING_CHECKS,
-                CHECK_TIMEOUT,
-                CHECK_SLOT_WAIT,
-                MAX_NEW_CHECKS,
-                LOGIN_WINDOW,
-            ),
+            checks: CheckRunner::new(MAX_RUNNING_CHECKS, CHECK_TIMEOUT, CHECK_SLOT_WAIT),
             services: services.iter().map(|s| s.to_string()).collect(),
             sign_in_version,
+            subject_key,
         })
     }
 
-    /// The `ver` every code, access and refresh token must carry: a keyed hash of the sign-in mode
-    /// and the verifier's [generation](CredentialVerifier::generation). Changing the owner's
-    /// password, switching between sign-in modes or rotating `OAUTH_SIGNING_KEY` changes it and so
-    /// ends every earlier grant.
+    /// The `ver` every code, access and refresh token must carry: a keyed hash of the sign-in
+    /// mode, the verifier's [label](CredentialVerifier::label) and its
+    /// [generation](CredentialVerifier::generation). Changing the owner's password, switching
+    /// sign-in mode or verifier, or rotating `OAUTH_SIGNING_KEY` changes it and so ends every
+    /// earlier grant.
     pub fn sign_in_version(&self) -> &str {
         &self.sign_in_version
     }
@@ -221,10 +233,30 @@ impl AuthState {
             .is_some_and(|v| crate::pkce::ct_eq(v, &self.sign_in_version));
         let mode_ok = p.credential.is_some() == self.verifier.carried();
         let now = jsonwebtoken::get_current_timestamp();
-        let fresh = p.auth_time.is_some_and(|t| {
-            t <= now + crate::jwt::LEEWAY_SECS && now - t.min(now) < MAX_GRANT_AGE.as_secs()
-        });
+        // auth_time is signed, so only its age needs checking; a time slightly ahead is another
+        // replica's clock.
+        let fresh = p
+            .auth_time
+            .is_some_and(|t| now.saturating_sub(t) < MAX_GRANT_AGE.as_secs());
         version_ok && mode_ok && fresh
+    }
+
+    /// Who signed in with `credential`: what the verifier names
+    /// ([`CredentialVerifier::subject`]), else `key:` and 16 hex digits of a keyed hash of the
+    /// credential when credentials are carried, and `owner` otherwise.
+    pub fn subject_of(&self, credential: &str) -> String {
+        if let Some(subject) = self.verifier.subject(credential) {
+            return subject;
+        }
+        if !self.verifier.carried() {
+            return "owner".into();
+        }
+        let tag = ring::hmac::sign(&self.subject_key, credential.as_bytes());
+        let hex: String = tag.as_ref()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("key:{hex}")
     }
 
     /// The settings this server was built with.

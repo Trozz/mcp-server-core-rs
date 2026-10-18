@@ -2,6 +2,7 @@ use super::AuthState;
 use crate::jwt::{Payload, TokenKind};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -23,7 +24,8 @@ pub struct RegisterRequest {
 }
 
 /// Whether a client may register `uri` as a redirect URI: `https` with a host, or `http` on a
-/// loopback host (RFC 8252 native apps), without a fragment or user information.
+/// loopback host (RFC 8252 native apps), without a fragment or user information, and at most
+/// [`MAX_REDIRECT_URI_LEN`] bytes.
 pub fn validate_redirect_uri(uri: &str) -> bool {
     if uri.len() > MAX_REDIRECT_URI_LEN {
         return false;
@@ -51,8 +53,20 @@ fn error(code: &str, description: &str) -> Response {
 
 pub async fn register(
     State(st): State<Arc<AuthState>>,
-    Json(req): Json<RegisterRequest>,
+    req: Result<Json<RegisterRequest>, JsonRejection>,
 ) -> Response {
+    let req = match req {
+        Ok(Json(req)) => req,
+        Err(r) if r.status() == StatusCode::PAYLOAD_TOO_LARGE => return r.into_response(),
+        Err(_) => {
+            metrics::counter!("oauth_requests_total", "endpoint" => "register", "outcome" => "invalid")
+            .increment(1);
+            return error(
+                "invalid_client_metadata",
+                "send a JSON client registration with redirect_uris",
+            );
+        }
+    };
     if req.client_name.as_deref().is_some_and(|n| {
         n.chars().count() > MAX_CLIENT_NAME_CHARS || n.chars().any(char::is_control)
     }) {

@@ -369,25 +369,61 @@ async fn people_signing_in_with_their_own_key_reach_tools_with_it() {
 }
 
 #[tokio::test]
-async fn hsts_is_sent_only_when_this_process_terminates_tls() {
+async fn hsts_is_sent_only_with_certificate_files() {
     let server = owner_server();
-    for (insecure, want) in [("true", false), ("false", true)] {
-        let app = build(
-            &server,
-            &[
-                ("OAUTH_ADMIN_PASSWORD", "a long password"),
-                ("INSECURE_HTTP", insecure),
-            ],
-        );
-        let res = app
+    let password = ("OAUTH_ADMIN_PASSWORD", "a long password");
+    let files = [
+        ("INSECURE_HTTP", "false"),
+        ("TLS_CERT_PATH", "/etc/ssl/mcp/cert.pem"),
+        ("TLS_KEY_PATH", "/etc/ssl/mcp/key.pem"),
+        password,
+    ];
+    for (vars, want) in [
+        (&[password, ("INSECURE_HTTP", "true")][..], false),
+        (&[password, ("INSECURE_HTTP", "false")][..], false),
+        (&files[..], true),
+    ] {
+        let res = build(&server, vars)
             .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(
             res.headers().contains_key("strict-transport-security"),
             want,
-            "INSECURE_HTTP={insecure}"
+            "{vars:?}"
         );
         assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+    }
+}
+
+#[tokio::test]
+async fn security_headers_reach_every_response() {
+    let server = owner_server()
+        .wrap_router(|app| app.route("/version", axum::routing::get(|| async { "9.9.9" })));
+    let app = build(
+        &server,
+        &[
+            ("OAUTH_ADMIN_PASSWORD", "a long password"),
+            ("INSECURE_HTTP", "false"),
+            ("TLS_CERT_PATH", "/etc/ssl/mcp/cert.pem"),
+            ("TLS_KEY_PATH", "/etc/ssl/mcp/key.pem"),
+        ],
+    );
+    let too_big = Request::post("/register")
+        .header("content-type", "application/json")
+        .body(Body::from(vec![b' '; 2 * 1024 * 1024]))
+        .unwrap();
+    for req in [
+        Request::get("/favicon.ico").body(Body::empty()).unwrap(),
+        Request::get("/version").body(Body::empty()).unwrap(),
+        too_big,
+    ] {
+        let uri = req.uri().clone();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff", "{uri}");
+        assert!(
+            res.headers().contains_key("strict-transport-security"),
+            "{uri}"
+        );
     }
 }

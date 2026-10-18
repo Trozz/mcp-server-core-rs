@@ -150,9 +150,12 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
 /// The address a request came from, for rate limiting. `X-Forwarded-For` is believed only when
 /// the connection comes from one of the `trusted` proxies: then the rightmost entry that is not
 /// itself a trusted proxy is the client. A malformed entry, or none, falls back to the peer.
+/// IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1`, as a dual-stack listener reports IPv4 peers)
+/// are treated as the IPv4 address, in the peer, the header and `trusted` alike.
 pub fn client_ip(peer: Option<IpAddr>, headers: &HeaderMap, trusted: &[IpAddr]) -> IpAddr {
-    let peer_ip = peer.unwrap_or(IpAddr::from([0, 0, 0, 0]));
-    if !trusted.contains(&peer_ip) {
+    let peer_ip = peer.unwrap_or(IpAddr::from([0, 0, 0, 0])).to_canonical();
+    let is_trusted = |ip: IpAddr| trusted.iter().any(|t| t.to_canonical() == ip);
+    if !is_trusted(peer_ip) {
         return peer_ip;
     }
     let entries: Vec<&str> = headers
@@ -166,7 +169,8 @@ pub fn client_ip(peer: Option<IpAddr>, headers: &HeaderMap, trusted: &[IpAddr]) 
         let Some(ip) = forwarded_ip(entry) else {
             return peer_ip;
         };
-        if !trusted.contains(&ip) {
+        let ip = ip.to_canonical();
+        if !is_trusted(ip) {
             return ip;
         }
     }
@@ -515,7 +519,7 @@ pub async fn post_authorize(
         auth_time: Some(jsonwebtoken::get_current_timestamp()),
         ..Default::default()
     };
-    let subject = st.verifier.subject(entered);
+    let subject = st.subject_of(entered);
     let audience = st.settings.public_url.clone();
     let Ok(code) = st.jwt.issue_as(
         TokenKind::Code,
@@ -776,6 +780,23 @@ mod tests {
                 "{entry}"
             );
         }
+    }
+
+    #[test]
+    fn client_ip_treats_ipv4_mapped_addresses_as_ipv4() {
+        let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
+        let client: IpAddr = "198.51.100.66".parse().unwrap();
+        // A dual-stack listener reports an IPv4 proxy as ::ffff:10.0.0.1.
+        assert_eq!(
+            client_ip(Some(mapped), &xff(&["198.51.100.66"]), &[proxy]),
+            client
+        );
+        assert_eq!(
+            client_ip(Some(proxy), &xff(&["::ffff:198.51.100.66"]), &[mapped]),
+            client
+        );
+        assert_eq!(client_ip(Some(mapped), &HeaderMap::new(), &[]), proxy);
     }
 
     #[test]

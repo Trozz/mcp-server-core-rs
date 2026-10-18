@@ -19,8 +19,8 @@ as claude.ai expect, with sign-in, TLS and the hardening a server shared by many
   your tools, so one deployment serves many people. Or bring your own check.
 - **Several services on one server**: each at `/<name>` and its own OAuth resource, and all their
   tools together at `/mcp`.
-- **Hardened**: sign-in limits per address and overall, capped and shared upstream credential
-  checks, grants that end when the password changes and 90 days after sign-in, MCP sessions bound
+- **Hardened**: sign-in limits per address, per network and overall, capped and shared upstream
+  credential checks, grants that end when the password changes and 90 days after sign-in, MCP sessions bound
   to the credential that opened them, host and origin checks against DNS rebinding, capped client
   registration, body limits, constant-time comparisons, secrets kept out of logs. See
   [SECURITY.md](SECURITY.md) for what it does not do.
@@ -168,8 +168,9 @@ impl CredentialVerifier for ApiKeys {
 }
 ```
 
-Checks run with a timeout, at most 16 at once, and once at a time per credential. A rejection
-counts towards the sign-in limits; `Unavailable` does not.
+Checks run with a timeout, at most 16 at once, and once at a time per credential. Each check counts
+towards the sign-in limits (5 a minute per address, 25 per IPv4 /24 or IPv6 /48) while it runs; a
+rejection keeps counting, while `Valid` and `Unavailable` are given back.
 
 ## Endpoints
 
@@ -193,7 +194,7 @@ instead: `OAUTH_SIGNING_KEY_FILE=/run/secrets/key`.
 | `PUBLIC_URL` | required | The external URL clients use, without a path: `https://mcp.example.com`. `http://` only for `localhost`. |
 | `OAUTH_SIGNING_KEY` | required | At least 32 bytes (`openssl rand -hex 32`). Changing it signs everyone out. |
 | `OAUTH_ADMIN_PASSWORD` | required for `OwnerPassword` | The owner's password, at least 12 characters. |
-| `MCP_AUTH_TOKEN` | none | A fixed bearer token, for clients that cannot do OAuth (not with `ServiceCredential`). Use a long random value. |
+| `MCP_AUTH_TOKEN` | none | A fixed bearer token, for clients that cannot do OAuth. Not with a verifier that takes people's own credentials or accepts them as bearer tokens, and not shaped like a JWT (three dot-separated parts). Use a long random value (`openssl rand -hex 32`). |
 | `<PREFIX>_SERVICES` | all | Comma-separated services to run. |
 | `<PREFIX>_COMBINED` | `true` | Serve every service's tools together at `/mcp`. |
 | `<PREFIX>_READ_ONLY` | none | Comma-separated services, or `all`, whose write tools are hidden and refused. |
@@ -257,9 +258,17 @@ person's browser opens. With nginx:
 limit_req_zone $http_authorization zone=per_token:10m rate=20r/s;
 limit_req_zone $binary_remote_addr zone=sign_in:10m rate=10r/m;
 
+# Keep the public host (the MCP endpoints check it) and pass the client's address on.
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
 location /authorize { limit_req zone=sign_in burst=10; proxy_pass https://mcp; }
 location /          { limit_req zone=per_token burst=40; proxy_pass https://mcp; }
 ```
+
+Set `TRUSTED_PROXIES` to nginx's address, or every client shares nginx's sign-in limits. Requests
+without an `Authorization` header, such as `/token` and `/register`, are not limited by the
+per-token zone.
 
 ## Security
 

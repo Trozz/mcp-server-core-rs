@@ -59,8 +59,8 @@ pub const RECOMMENDED_STATIC_TOKEN_CHARS: usize = 32;
 /// How people sign in, and what their tokens carry.
 ///
 /// Deliberately small. For single sign-on, MFA or many named users, put an identity-aware
-/// gateway (such as Cloudflare Access or oauth2-proxy) in front of `/authorize`, or ask for an
-/// external authorization server mode; see the README.
+/// gateway (such as Cloudflare Access or oauth2-proxy) in front of `/authorize`; see
+/// SECURITY.md.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub enum SignIn {
@@ -386,14 +386,17 @@ impl Server {
             }
         }
         let mut warnings = Vec::new();
-        if let (Some(core), Some(v)) = (&core, &verifier)
-            && let Some(token) = &core.oauth.static_token
-        {
-            if let Some(problem) =
-                crate::oauth::static_token_problem(token.expose_secret(), v.as_ref())
-            {
-                env.errors.push(problem);
-            } else if token.expose_secret().chars().count() < RECOMMENDED_STATIC_TOKEN_CHARS {
+        if let Some(token) = core.as_ref().and_then(|c| c.oauth.static_token.as_ref()) {
+            let token = token.expose_secret();
+            let problems: Vec<String> = verifier
+                .as_ref()
+                .and_then(|v| crate::oauth::static_token_verifier_problem(v.as_ref()))
+                .into_iter()
+                .chain(crate::oauth::static_token_shape_problem(token))
+                .collect();
+            if !problems.is_empty() {
+                env.errors.extend(problems);
+            } else if token.chars().count() < RECOMMENDED_STATIC_TOKEN_CHARS {
                 warnings.push(format!(
                     "MCP_AUTH_TOKEN is shorter than {RECOMMENDED_STATIC_TOKEN_CHARS} characters: use a long random value"
                 ));
@@ -465,7 +468,10 @@ impl Server {
 
     /// The whole HTTP application: `/healthz`, the OAuth routes, each service at `/<name>` (its
     /// own OAuth protected resource, under its read-only rule and audit log), `/favicon.ico` when
-    /// there is an icon and, when `loaded.combined`, every service's tools together at `/mcp`.
+    /// there is an icon and, when `loaded.combined`, every service's tools together at `/mcp`,
+    /// passed through [`wrap_router`](Self::wrap_router). Every response, the wrapped routes'
+    /// too, sends `X-Content-Type-Options: nosniff`, and `Strict-Transport-Security` when the
+    /// server serves certificate files (`TLS_CERT_PATH`).
     pub fn router(&self, loaded: &Loaded, ctx: &ServiceContext) -> axum::Router {
         let services = &loaded.services;
         assert!(
@@ -488,19 +494,7 @@ impl Server {
         if combined {
             routers.push((COMBINED, self.combined_router(loaded, ctx)));
         }
-        let mut app = build_app(auth, routers);
-        if loaded.core.tls.is_tls() {
-            // Only when this process terminates TLS; behind a proxy, the proxy decides.
-            app = app.layer(axum::middleware::map_response(
-                |mut res: axum::response::Response| async move {
-                    res.headers_mut().insert(
-                        axum::http::header::STRICT_TRANSPORT_SECURITY,
-                        axum::http::HeaderValue::from_static("max-age=31536000"),
-                    );
-                    res
-                },
-            ));
-        }
+        let app = build_app(auth, routers);
         let app = match self.icon {
             Some((png, _)) => app.route(
                 "/favicon.ico",
@@ -510,10 +504,29 @@ impl Server {
             ),
             None => app,
         };
-        match self.wrap {
+        let app = match self.wrap {
             Some(wrap) => wrap(app),
             None => app,
-        }
+        };
+        // HSTS only with certificate files: a self-signed certificate means local use or a proxy
+        // in front, and the proxy sets its own policy.
+        let hsts = matches!(loaded.core.tls, tls::TlsMode::Files { .. });
+        app.layer(axum::middleware::map_response(
+            move |mut res: axum::response::Response| async move {
+                let headers = res.headers_mut();
+                headers.insert(
+                    axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                    axum::http::HeaderValue::from_static("nosniff"),
+                );
+                if hsts {
+                    headers.insert(
+                        axum::http::header::STRICT_TRANSPORT_SECURITY,
+                        axum::http::HeaderValue::from_static("max-age=31536000"),
+                    );
+                }
+                res
+            },
+        ))
     }
 
     /// Every service's log caps.
@@ -1015,6 +1028,14 @@ mod tests {
         let mut e = with_core(&[("MCP_AUTH_TOKEN", "aaa.bbb.ccc")]);
         assert!(s.load(&mut e).is_none());
         assert!(e.errors[0].contains("shape of a JWT"), "{:?}", e.errors);
+        // Reported with the other errors, not only once they are fixed.
+        let mut e = with_core(&[
+            ("OAUTH_ADMIN_PASSWORD", "short"),
+            ("MCP_AUTH_TOKEN", "aaa.bbb.ccc"),
+        ]);
+        assert!(s.load(&mut e).is_none());
+        assert!(e.errors.iter().any(|x| x.contains("shape of a JWT")));
+        assert!(e.errors.iter().any(|x| x.contains("OAUTH_ADMIN_PASSWORD")));
         let mut e = with_core(&[("MCP_AUTH_TOKEN", "short-token")]);
         let loaded = s.load(&mut e).expect("loads");
         assert!(

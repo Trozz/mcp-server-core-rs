@@ -130,7 +130,8 @@ pub type CheckFuture<'a> = Pin<Box<dyn Future<Output = CredentialCheck> + Send +
 /// ```
 pub trait CredentialVerifier: Send + Sync + 'static {
     /// The credential's name in lower case, as it reads in a sentence and on the sign-in page,
-    /// e.g. "password" or "Companies House API key".
+    /// e.g. "password" or "Companies House API key". It also tells verifiers apart in the
+    /// sign-in version, so changing it signs everyone out.
     fn label(&self) -> &str;
     /// One sentence of help under the field, plain text: what it is and where to get one.
     fn help(&self) -> &str {
@@ -162,23 +163,18 @@ pub trait CredentialVerifier: Send + Sync + 'static {
         self.carried()
     }
     /// Who signed in with `credential`: the `sub` of their tokens, the audit log's subject and a
-    /// [`Caller`](crate::caller::Caller)'s subject. It must not reveal the credential. Defaults
-    /// to `key:` and the first 16 hex digits of the credential's SHA-256 when credentials are
-    /// carried (one subject per person), and `owner` otherwise.
-    fn subject(&self, credential: &str) -> String {
-        if self.carried() {
-            let hex: String = fingerprint(credential)[..8]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            format!("key:{hex}")
-        } else {
-            "owner".to_string()
-        }
+    /// [`Caller`](crate::caller::Caller)'s subject. It must not reveal the credential, and is
+    /// readable by anyone who sees a token or a log line. Defaults to `None`, which lets the
+    /// server name them: `key:` and 16 hex digits of a hash of the credential keyed by
+    /// `OAUTH_SIGNING_KEY` when credentials are carried (one subject per person), and `owner`
+    /// otherwise.
+    fn subject(&self, credential: &str) -> Option<String> {
+        let _ = credential;
+        None
     }
     /// Bytes that change whenever every earlier sign-in should end, such as a hash of the
-    /// password. Tokens carry a keyed hash of them, so a change signs everyone out. Defaults to
-    /// none.
+    /// password, or a new upstream service or environment. Tokens carry a keyed hash of them and
+    /// of [`label`](Self::label), so a change to either signs everyone out. Defaults to none.
     fn generation(&self) -> &[u8] {
         &[]
     }
@@ -403,11 +399,6 @@ pub(crate) struct CheckRunner {
     timeout: Duration,
     wait: Duration,
     running: Mutex<HashMap<[u8; 32], watch::Receiver<Option<CredentialCheck>>>>,
-    /// At most this many checks start per `window`, across every address: new credentials from
-    /// fresh addresses cannot turn the server into an amplifier against the upstream service.
-    started: Mutex<std::collections::VecDeque<Instant>>,
-    max_started: usize,
-    window: Duration,
 }
 
 /// How a request takes part in a credential check.
@@ -425,51 +416,15 @@ pub(crate) struct Lead {
 }
 
 impl CheckRunner {
-    #[cfg(test)]
+    /// At most `max_running` checks at once, each bounded by `timeout`; a check waits up to
+    /// `wait` for a free slot.
     pub fn new(max_running: usize, timeout: Duration, wait: Duration) -> Self {
-        Self::with_rate(
-            max_running,
-            timeout,
-            wait,
-            usize::MAX,
-            Duration::from_secs(60),
-        )
-    }
-
-    /// Like [`new`](Self::new), starting at most `max_started` checks per `window`.
-    pub fn with_rate(
-        max_running: usize,
-        timeout: Duration,
-        wait: Duration,
-        max_started: usize,
-        window: Duration,
-    ) -> Self {
         CheckRunner {
             permits: Semaphore::new(max_running),
             timeout,
             wait,
             running: Mutex::new(HashMap::new()),
-            started: Mutex::new(std::collections::VecDeque::new()),
-            max_started,
-            window,
         }
-    }
-
-    /// Takes a start from the window's allowance; `false` when it is used up.
-    fn take_start(&self) -> bool {
-        let now = Instant::now();
-        let mut started = self.started.lock().unwrap_or_else(|e| e.into_inner());
-        while started
-            .front()
-            .is_some_and(|t| now.duration_since(*t) >= self.window)
-        {
-            started.pop_front();
-        }
-        if started.len() >= self.max_started {
-            return false;
-        }
-        started.push_back(now);
-        true
     }
 
     /// Joins the check of the credential with this fingerprint: as its lead when none is
@@ -494,13 +449,6 @@ impl CheckRunner {
         verifier: &dyn CredentialVerifier,
         credential: &str,
     ) -> CredentialCheck {
-        if !self.take_start() {
-            let verdict = CredentialCheck::Unavailable(
-                "the server is checking too many new credentials; try again in a minute".into(),
-            );
-            self.finish(lead, verdict.clone());
-            return verdict;
-        }
         let verdict = match tokio::time::timeout(self.wait, self.permits.acquire()).await {
             Ok(Ok(_permit)) => {
                 match tokio::time::timeout(self.timeout, verifier.check(credential)).await {
@@ -789,30 +737,8 @@ mod tests {
         assert!(matches!(runner.join(fingerprint("k")), Ticket::Lead(_)));
     }
 
-    #[tokio::test]
-    async fn checks_started_per_window_are_capped() {
-        let runner = CheckRunner::with_rate(
-            4,
-            Duration::from_secs(5),
-            Duration::ZERO,
-            2,
-            Duration::from_millis(200),
-        );
-        let v = slow(1);
-        for key in ["a", "b"] {
-            assert_eq!(runner.check(&v, key).await, CredentialCheck::Invalid(None));
-        }
-        assert!(matches!(
-            runner.check(&v, "c").await,
-            CredentialCheck::Unavailable(m) if m.contains("too many new credentials")
-        ));
-        assert_eq!(v.checks.load(std::sync::atomic::Ordering::SeqCst), 2);
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert_eq!(runner.check(&v, "c").await, CredentialCheck::Invalid(None));
-    }
-
     #[test]
-    fn subjects_name_the_person_without_revealing_the_credential() {
+    fn subjects_and_generations_default_sensibly() {
         struct Key;
         impl CredentialVerifier for Key {
             fn label(&self) -> &str {
@@ -822,14 +748,10 @@ mod tests {
                 Box::pin(async { CredentialCheck::Valid })
             }
         }
-        let s = Key.subject("secret-key-1");
-        assert!(s.starts_with("key:") && s.len() == 20, "{s}");
-        assert!(!s.contains("secret"));
-        assert_ne!(s, Key.subject("secret-key-2"));
-        assert_eq!(s, Key.subject("secret-key-1"));
+        assert_eq!(Key.subject("secret-key-1"), None, "the server names them");
         assert!(Key.generation().is_empty());
         let owner = PasswordVerifier::new("a long password".to_string().into());
-        assert_eq!(owner.subject("a long password"), "owner");
+        assert_eq!(owner.subject("a long password"), None);
         let other = PasswordVerifier::new("another password".to_string().into());
         assert_ne!(owner.generation(), other.generation());
         assert_eq!(owner.generation().len(), 32);
