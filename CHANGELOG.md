@@ -5,6 +5,13 @@ All notable changes to this crate are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (before 1.0, a minor version may change
 the API).
 
+## [Unreleased]
+
+### Added
+
+- A documentation site, <https://trozz.github.io/mcp-server-core-rs/>, built with mdBook from
+  `docs/` and published from `main`. Its Rust examples are compiled as doctests.
+
 ## [0.1.0] - 2026-10-18
 
 The first release, extracted from the servers behind

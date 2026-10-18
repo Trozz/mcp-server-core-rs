@@ -1,0 +1,19 @@
+[book]
+title = "mcp-server-core"
+description = "A batteries-included base for MCP servers over Streamable HTTP, in Rust"
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output]
+
+[output.html]
+site-url = "/mcp-server-core-rs/"
+git-repository-url = "https://github.com/Trozz/mcp-server-core-rs"
+edit-url-template = "https://github.com/Trozz/mcp-server-core-rs/edit/main/docs/{path}"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]

@@ -106,6 +106,19 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  book:
+    name: book
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          bash scripts/install-docs-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: bash scripts/build-docs.sh
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-24.04

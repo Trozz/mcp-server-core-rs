@@ -11,6 +11,9 @@ over Streamable HTTP, built on the official Rust SDK, [rmcp](https://crates.io/c
 You write the tools. `mcp-server-core` puts them on the internet the way hosted MCP clients such
 as claude.ai expect, with sign-in, TLS and the hardening a server shared by many people needs.
 
+**Documentation: <https://trozz.github.io/mcp-server-core-rs/>** (guides, configuration, security
+and limits) and [docs.rs](https://docs.rs/mcp-server-core) (the API).
+
 - **OAuth 2.1 built in**: dynamic client registration, PKCE (S256), resource indicators
   (RFC 8707) and protected-resource metadata (RFC 9728). Nothing to store: every token is a signed
   JWT, so restarts and extra replicas sign nobody out.

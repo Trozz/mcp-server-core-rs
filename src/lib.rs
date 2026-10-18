@@ -109,6 +109,56 @@ pub use rmcp;
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+/// The documentation site's pages (`docs/src`), compiled as doctests so their examples stay
+/// correct.
+#[cfg(doctest)]
+mod book {
+    #[doc = include_str!("../docs/src/introduction.md")]
+    struct Introduction;
+    #[doc = include_str!("../docs/src/quick-start.md")]
+    struct QuickStart;
+    #[doc = include_str!("../docs/src/writing-a-service.md")]
+    struct WritingAService;
+    #[doc = include_str!("../docs/src/combined.md")]
+    struct Combined;
+    #[doc = include_str!("../docs/src/prompts.md")]
+    struct Prompts;
+    #[doc = include_str!("../docs/src/examples.md")]
+    struct Examples;
+    #[doc = include_str!("../docs/src/sign-in.md")]
+    struct SignIn;
+    #[doc = include_str!("../docs/src/oauth.md")]
+    struct Oauth;
+    #[doc = include_str!("../docs/src/connecting-clients.md")]
+    struct ConnectingClients;
+    #[doc = include_str!("../docs/src/configuration.md")]
+    struct Configuration;
+    #[doc = include_str!("../docs/src/deployment.md")]
+    struct Deployment;
+    #[doc = include_str!("../docs/src/read-only-and-audit.md")]
+    struct ReadOnlyAndAudit;
+    #[doc = include_str!("../docs/src/observability.md")]
+    struct Observability;
+    #[doc = include_str!("../docs/src/troubleshooting.md")]
+    struct Troubleshooting;
+    #[doc = include_str!("../docs/src/security.md")]
+    struct Security;
+    #[doc = include_str!("../docs/src/limits.md")]
+    struct Limits;
+    #[doc = include_str!("../docs/src/endpoints.md")]
+    struct Endpoints;
+    #[doc = include_str!("../docs/src/lower-level-api.md")]
+    struct LowerLevelApi;
+    #[doc = include_str!("../docs/src/changelog.md")]
+    struct Changelog;
+    #[doc = include_str!("../docs/src/architecture.md")]
+    struct Architecture;
+    #[doc = include_str!("../docs/src/contributing.md")]
+    struct Contributing;
+    #[doc = include_str!("../docs/src/releases.md")]
+    struct Releases;
+}
+
 /// Installs rustls' `ring` crypto provider as the process default. Call it once before serving
 /// TLS or making TLS requests; later calls do nothing. [`app::Server::main`] calls it for you.
 pub fn install_crypto_provider() {
