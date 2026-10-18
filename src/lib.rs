@@ -14,9 +14,8 @@
 //! - **Several services on one server**, each at `/<name>` and its own OAuth protected resource,
 //!   plus every service's tools together at `/mcp`.
 //! - **Hardening for servers shared by many people**: sign-in limits per address, per network
-//!   and overall, capped and shared upstream credential checks, MCP sessions bound to the
-//!   credential that opened them, host and origin checks, body limits and constant-time
-//!   comparisons.
+//!   and overall, capped and shared upstream credential checks, MCP sessions bound to each
+//!   person's credential, host and origin checks, body limits and constant-time comparisons.
 //! - **Read-only mode and a write audit log** for every service, driven by each tool's
 //!   `read_only_hint` annotation.
 //! - **TLS** from certificate files (hot reloaded) or a self-signed certificate, or plain HTTP

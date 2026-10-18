@@ -23,8 +23,8 @@ and limits) and [docs.rs](https://docs.rs/mcp-server-core) (the API).
 - **Several services on one server**: each at `/<name>` and its own OAuth resource, and all their
   tools together at `/mcp`.
 - **Hardened**: sign-in limits per address, per network and overall, capped and shared upstream
-  credential checks, grants that end when the password changes and 90 days after sign-in, MCP sessions bound
-  to the credential that opened them, host and origin checks against DNS rebinding, capped client
+  credential checks, grants that end when the password changes and 90 days after sign-in, MCP
+  sessions bound to each person's credential, host and origin checks against DNS rebinding, capped client
   registration, body limits, constant-time comparisons, secrets kept out of logs. See
   [SECURITY.md](SECURITY.md) for what it does not do.
 - **Read-only mode and an audit log** for every service, from each tool's `read_only_hint`.
@@ -42,9 +42,11 @@ cargo add tokio --features macros,rt-multi-thread
 cargo add serde --features derive
 ```
 
-A service is a name and an rmcp handler; the `Server` builder does the rest.
+A service is a name and an rmcp handler; the `Server` builder does the rest. rmcp's macros refer to
+a crate named `rmcp`, so bring the re-export into scope in every file that uses them.
 
 ```rust,no_run
+use mcp_server_core::rmcp; // rmcp's macros need `rmcp` in scope
 use mcp_server_core::app::{Server, SignIn};
 use mcp_server_core::combined::DynHandler;
 use mcp_server_core::rmcp::handler::server::router::tool::ToolRouter;
@@ -194,7 +196,7 @@ instead: `OAUTH_SIGNING_KEY_FILE=/run/secrets/key`.
 
 | Variable | Default | |
 |---|---|---|
-| `PUBLIC_URL` | required | The external URL clients use, without a path: `https://mcp.example.com`. `http://` only for `localhost`. |
+| `PUBLIC_URL` | required | The external URL clients use, without a path: `https://mcp.example.com`. `http://` only for `localhost`, `127.0.0.1` or `[::1]`. |
 | `OAUTH_SIGNING_KEY` | required | At least 32 bytes (`openssl rand -hex 32`). Changing it signs everyone out. |
 | `OAUTH_ADMIN_PASSWORD` | required for `OwnerPassword` | The owner's password, at least 12 characters. |
 | `MCP_AUTH_TOKEN` | none | A fixed bearer token, for clients that cannot do OAuth. Not with a verifier that takes people's own credentials or accepts them as bearer tokens, and not shaped like a JWT (three dot-separated parts). Use a long random value (`openssl rand -hex 32`). |
@@ -212,7 +214,7 @@ instead: `OAUTH_SIGNING_KEY_FILE=/run/secrets/key`.
 | `DEBUG` | `false` | Debug logs for your crates and this one. |
 | `DEBUG_UNSAFE_LOG_CONTENT` | `false` | Let services log content. Never in production. |
 | `METRICS_ADDR` | none | Serve Prometheus metrics, e.g. `0.0.0.0:9090`. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Export traces over OTLP/HTTP; the standard `OTEL_*` variables apply. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Export traces over OTLP/HTTP. Only this variable turns export on; the standard `OTEL_*` variables then apply. |
 
 `<PREFIX>` is set with `Server::env_prefix` (default `MCP`). Your services read their own variables
 from the `ServiceEnv` they are given, recording problems in `env.errors` so every mistake is
@@ -304,7 +306,8 @@ follows rmcp's minor versions (it is re-exported as `mcp_server_core::rmcp`; use
 depending on a different rmcp yourself). Until 1.0, minor versions may change the API; see the
 [changelog](CHANGELOG.md).
 
-Used by [mcp-icloud](https://github.com/Trozz/mcp-icloud).
+Used by [mcp-icloud](https://github.com/Trozz/mcp-icloud) and
+[mcp-companies-house](https://github.com/Trozz/mcp-companies-house).
 
 ## Licence
 

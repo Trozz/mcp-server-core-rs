@@ -22,7 +22,8 @@ async fn nosniff(mut res: Response) -> Response {
     res
 }
 
-/// Counts requests by matched route and status in `http_requests_total`.
+/// Counts requests by matched route and status in `http_requests_total`. Inside the body limit, so
+/// a request refused for its declared `Content-Length` is not counted.
 pub async fn http_metrics(req: Request, next: Next) -> Response {
     let route = req
         .extensions()

@@ -314,7 +314,8 @@ impl ServerHandler for Combined {
 
     /// Routes by prefix and tells the service, through [`ToolPrefix`], to name its tools with
     /// the same prefix; any of its tool names the prompt's text still has bare get the prefix
-    /// here. An unknown prompt is reported with the name the client sent.
+    /// here. A service's [`not_found`] for its own name is reported with the name the client sent;
+    /// other errors, such as rmcp's prompt router's, pass through unchanged.
     async fn get_prompt(
         &self,
         mut request: GetPromptRequestParams,

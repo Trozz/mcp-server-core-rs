@@ -23,10 +23,11 @@ behalf. It defends against:
   a per-address limit (5 a minute; IPv6 by /64) and a per-block limit (25 a minute per IPv4 /24 or
   IPv6 /48), counted from the moment a check starts, and a blocked address cannot sign in or use
   the static token, even correctly, until the limit clears. Failures across all addresses are
-  capped at 30 a minute too. With one shared secret (the owner's password, the static token) reaching
-  that cap blocks everyone, the owner included, while the attack lasts, so a botnet gains nothing
-  from more addresses; clients that already hold an OAuth token keep working. With per-person
-  credentials the cap blocks only addresses that have failed themselves, so an attacker cannot
+  capped at 30 a minute too. When the credential only proves who may sign in (the owner's password,
+  the static token, a custom verifier that does not carry credentials), reaching that cap blocks
+  everyone, the owner included, while the attack lasts, so a botnet gains nothing from more
+  addresses; clients that already hold an OAuth token keep working. When each person signs in with
+  their own carried credential, the cap blocks only addresses that have failed themselves, so an attacker cannot
   lock out people on other networks (people sharing the attacker's /24 or /48 can be held up by
   its block limit). This server's own tokens, even expired, never count. On an owner's-password
   server without a static token, other bearer tokens could not be a guess at anything and are
@@ -59,8 +60,10 @@ behalf. It defends against:
   files (`TLS_CERT_PATH`); with a self-signed certificate or plain HTTP, the proxy in front sets
   its own policy. `server::build_app` on its own sends nosniff only.
 - **DNS rebinding and cross-site requests.** The MCP endpoints check `Host` and `Origin`.
-- **One person reaching another's session.** MCP sessions are bound to the credential that
-  opened them; a session id is useless with any other credential. When the session table is full,
+- **One person reaching another's session.** When people sign in with their own credentials, MCP
+  sessions are bound to the credential that opened them; a session id is useless with any other
+  credential. (With the owner's password every session belongs to the one owner.) Requests on MCP
+  protocol revisions that rmcp serves without sessions have nothing to bind. When the session table is full,
   a newcomer takes a slot from whoever holds the most, so nobody is pushed out by someone holding
   fewer.
 - **Credential exposure.** Upstream credentials are never stored: they are encrypted

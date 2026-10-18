@@ -12,6 +12,7 @@
 
 use mcp_server_core::app::{Server, SignIn};
 use mcp_server_core::combined::DynHandler;
+use mcp_server_core::rmcp; // rmcp's macros need `rmcp` in scope
 use mcp_server_core::rmcp::handler::server::router::tool::ToolRouter;
 use mcp_server_core::rmcp::handler::server::wrapper::Parameters;
 use mcp_server_core::rmcp::model::{

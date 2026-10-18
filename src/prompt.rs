@@ -87,7 +87,9 @@ pub fn user_prompt(description: &str, text: String) -> GetPromptResult {
         .with_description(description)
 }
 
-/// The error for a prompt name the service does not have, worded as rmcp's prompt router does.
+/// The error for a prompt name the service does not have, with the same message as rmcp's prompt
+/// router (which also attaches the available names as data). On `/mcp`, a service's `not_found`
+/// for its own name is reported with the prefixed name the client sent.
 pub fn not_found(name: &str) -> McpError {
     McpError::invalid_params(format!("prompt '{name}' not found"), None)
 }
