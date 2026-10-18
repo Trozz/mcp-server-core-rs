@@ -9,9 +9,9 @@ description = "A batteries-included base for Model Context Protocol (MCP) server
 repository = "https://github.com/Trozz/mcp-server-core-rs"
 documentation = "https://docs.rs/mcp-server-core"
 readme = "README.md"
-keywords = ["mcp", "model-context-protocol", "oauth", "rmcp", "server"]
+keywords = ["mcp", "oauth", "rmcp", "server", "streamable-http"]
 categories = ["network-programming", "web-programming::http-server", "authentication"]
-include = ["src/**/*", "examples/**/*", "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE"]
+include = ["src/**/*", "examples/**/*", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE"]
 
 [features]
 default = ["otel", "prometheus"]
