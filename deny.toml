@@ -1,0 +1,40 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa is pulled in by jsonwebtoken rust_crypto but only HS256 (HMAC) is used (src/jwt.rs); no RSA signing or decryption occurs, and no patched rsa release exists" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+    "0BSD",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+deny = [
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
+    { crate = "native-tls" },
+    { crate = "aws-lc-rs" },
+    { crate = "aws-lc-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

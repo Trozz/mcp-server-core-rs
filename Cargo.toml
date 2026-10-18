@@ -1,0 +1,75 @@
+[package]
+name = "mcp-server-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["Michael Leer"]
+description = "A batteries-included base for Model Context Protocol (MCP) servers over Streamable HTTP: OAuth 2.1 sign-in, TLS, per-service routing, abuse limits and observability on top of rmcp."
+repository = "https://github.com/Trozz/mcp-server-core-rs"
+documentation = "https://docs.rs/mcp-server-core"
+readme = "README.md"
+keywords = ["mcp", "oauth", "rmcp", "server", "streamable-http"]
+categories = ["network-programming", "web-programming::http-server", "authentication"]
+include = ["src/**/*", "examples/**/*", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE"]
+
+[features]
+default = ["otel", "prometheus"]
+## Export traces over OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:reqwest"]
+## Serve Prometheus metrics on `METRICS_ADDR`.
+prometheus = ["dep:metrics-exporter-prometheus"]
+
+[dependencies]
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.53.3", features = ["rt", "net", "time", "sync", "signal", "io-util", "macros"] }
+tokio-util = "0.7.20"
+axum = "0.8.9"
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "logging", "tls12"] }
+rcgen = "0.14.10"
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["rust_crypto"] }
+ring = "0.17.14"
+subtle = "2.6.1"
+sha2 = "0.11.1"
+base64 = "0.23.1"
+secrecy = "0.10.3"
+url = "2.5.8"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+tower-http = { version = "0.7.1", features = ["limit", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+metrics = "0.24.6"
+# Re-exported as `mcp_server_core::rmcp`. Patch releases only: the policy wrapper forwards every
+# `ServerHandler` method, so a new minor version needs a release of this crate.
+rmcp = { version = "~3.5.1", features = ["server", "macros", "transport-streamable-http-server"] }
+
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
+tracing-opentelemetry = { version = "0.34.0", default-features = false, optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"], optional = true }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["full"] }
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.5"
+tempfile = "3.27.0"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs)'] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
