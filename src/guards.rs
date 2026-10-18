@@ -1,34 +1,88 @@
-//! Abuse limits: failed sign-in attempts per address and overall, and one-time codes.
+//! Abuse limits: failed sign-in attempts per address, per wider block and overall, and one-time
+//! codes.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Failures across all clients within one window that reach the global ceiling; what happens
-/// then is the limiter's [`Ceiling`]. The ceiling keeps an attacker from spreading guesses over
-/// many addresses.
+/// Rejections across all clients within one window that reach the global ceiling; what happens
+/// then is the limiter's [`Ceiling`]. Only settled rejections count here; checks still in flight
+/// do not, so a busy server never trips it by itself.
 pub const GLOBAL_MAX_FAILURES: usize = 30;
-const MAX_TRACKED_KEYS: usize = 10_000;
+/// Attempts (rejected or in flight) one wider block, an IPv6 /48 or IPv4 /24, may have in a
+/// window, so one allocation cannot spread over thousands of addresses.
+pub const BLOCK_MAX_ATTEMPTS: usize = 25;
+/// Addresses, and separately blocks, tracked at once.
+const MAX_TRACKED: usize = 10_000;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
-/// What happens once failures across all clients reach [`GLOBAL_MAX_FAILURES`] in a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Counted while its check runs; dropped again unless it is rejected.
+    Pending,
+    Failure,
+}
+
+#[derive(Default)]
+struct Bucket {
+    attempts: Vec<(Instant, Kind)>,
+}
+
+impl Bucket {
+    fn prune(&mut self, now: Instant, window: Duration) {
+        self.attempts
+            .retain(|(t, _)| now.duration_since(*t) < window);
+    }
+
+    fn has_failure(&self) -> bool {
+        self.attempts.iter().any(|(_, k)| *k == Kind::Failure)
+    }
+
+    fn take(&mut self, at: Instant) -> bool {
+        match self
+            .attempts
+            .iter()
+            .rposition(|(t, k)| *t == at && *k == Kind::Pending)
+        {
+            Some(i) => {
+                self.attempts.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// What happens once rejections across all clients reach [`GLOBAL_MAX_FAILURES`] in a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Ceiling {
-    /// Every client is blocked until the window passes, the owner too. Right for one shared
+    /// Every client is refused until the window passes, the owner too. Right for one shared
     /// secret, such as the owner's password, where a single right guess gives everything away:
     /// the total guessing rate stays bounded however many addresses an attacker has.
     BlockEveryone,
-    /// Only clients with an attempt of their own in the window (a rejection, or a check still in
-    /// flight) are blocked, so other people's failures never lock out someone who has not failed.
-    /// When so many addresses are tracked that the table is full, untracked addresses are blocked
-    /// too. Right when each person signs in with their own credential.
+    /// Only clients with a rejection of their own in the window are refused, so other people's
+    /// failures never lock out someone who has not failed. When so many addresses are tracked
+    /// that the table is full, an untracked address is judged by its block, and refused as
+    /// [`Refusal::Busy`] when that is untracked too. Right when each person signs in with their
+    /// own credential.
     BlockFailing,
 }
 
-/// Limits failed sign-in attempts: `max` per address (IPv6 by /64) per window, and a global
-/// ceiling so guesses spread over many addresses stay bounded too.
+/// Why an attempt was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// This client, or its block, has too many rejected or concurrent attempts.
+    TooMany,
+    /// So many addresses are failing that new, untracked ones cannot be told apart: the server
+    /// is under attack and refuses them until it calms down.
+    Busy,
+}
+
+/// Limits credential attempts per client address (IPv4 address, IPv6 /64) and per wider block
+/// (IPv4 /24, IPv6 /48), plus a ceiling on rejections across all clients.
 pub struct LoginLimiter {
     max: usize,
     window: Duration,
@@ -37,12 +91,14 @@ pub struct LoginLimiter {
 }
 
 struct LimiterState {
-    per_key: HashMap<IpAddr, Vec<Instant>>,
-    global: VecDeque<Instant>,
+    addresses: HashMap<IpAddr, Bucket>,
+    blocks: HashMap<IpAddr, Bucket>,
+    failures: VecDeque<Instant>,
     last_sweep: Instant,
 }
 
-fn limiter_key(ip: IpAddr) -> IpAddr {
+/// The client an address belongs to: the address itself for IPv4, its /64 for IPv6.
+fn address_key(ip: IpAddr) -> IpAddr {
     match ip.to_canonical() {
         IpAddr::V6(v6) => {
             let s = v6.segments();
@@ -52,112 +108,189 @@ fn limiter_key(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// The wider block an address belongs to: its IPv4 /24 or IPv6 /48.
+fn block_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0))
+        }
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            IpAddr::V4(Ipv4Addr::new(o[0], o[1], o[2], 0))
+        }
+    }
+}
+
 impl LimiterState {
     fn prune(&mut self, now: Instant, window: Duration) {
         while self
-            .global
+            .failures
             .front()
             .is_some_and(|t| now.duration_since(*t) >= window)
         {
-            self.global.pop_front();
+            self.failures.pop_front();
         }
         if now.duration_since(self.last_sweep) < SWEEP_INTERVAL {
             return;
         }
         self.last_sweep = now;
-        self.per_key.retain(|_, times| {
-            times.retain(|t| now.duration_since(*t) < window);
-            !times.is_empty()
-        });
+        for map in [&mut self.addresses, &mut self.blocks] {
+            map.retain(|_, b| {
+                b.prune(now, window);
+                !b.attempts.is_empty()
+            });
+        }
     }
 }
 
+fn push(map: &mut HashMap<IpAddr, Bucket>, key: IpAddr, at: Instant, kind: Kind) -> Option<IpAddr> {
+    if map.len() >= MAX_TRACKED && !map.contains_key(&key) {
+        return None;
+    }
+    map.entry(key).or_default().attempts.push((at, kind));
+    Some(key)
+}
+
 impl LoginLimiter {
-    /// At most `max` failures per address within `window`, and `ceiling` once failures across
-    /// all addresses reach [`GLOBAL_MAX_FAILURES`].
+    /// At most `max` attempts per address and [`BLOCK_MAX_ATTEMPTS`] per block within `window`,
+    /// and `ceiling` once rejections across all addresses reach [`GLOBAL_MAX_FAILURES`].
     pub fn new(max: usize, window: Duration, ceiling: Ceiling) -> Self {
         Self {
             max,
             window,
             ceiling,
             state: Mutex::new(LimiterState {
-                per_key: HashMap::new(),
-                global: VecDeque::new(),
+                addresses: HashMap::new(),
+                blocks: HashMap::new(),
+                failures: VecDeque::new(),
                 last_sweep: Instant::now(),
             }),
         }
     }
 
-    /// Whether `ip` may not try again yet.
+    /// Whether a new attempt from `ip` would be refused.
     pub fn is_blocked(&self, ip: IpAddr) -> bool {
+        self.refusal(ip).is_some()
+    }
+
+    /// Why a new attempt from `ip` would be refused, if it would.
+    pub fn refusal(&self, ip: IpAddr) -> Option<Refusal> {
         let mut state = self.state.lock().expect("limiter lock");
-        let now = Instant::now();
-        self.blocked(&mut state, limiter_key(ip), now)
+        self.blocked(&mut state, ip, Instant::now())
     }
 
-    fn blocked(&self, state: &mut LimiterState, key: IpAddr, now: Instant) -> bool {
+    fn blocked(&self, state: &mut LimiterState, ip: IpAddr, now: Instant) -> Option<Refusal> {
         state.prune(now, self.window);
-        let global_full = state.global.len() >= GLOBAL_MAX_FAILURES;
-        if global_full && self.ceiling == Ceiling::BlockEveryone {
-            return true;
+        let window = self.window;
+        let ceiling = state.failures.len() >= GLOBAL_MAX_FAILURES;
+        if ceiling && self.ceiling == Ceiling::BlockEveryone {
+            return Some(Refusal::TooMany);
         }
-        let Some(times) = state.per_key.get_mut(&key) else {
-            // Untracked because the table is full: its attempts only show in the global count.
-            return global_full && state.per_key.len() >= MAX_TRACKED_KEYS;
-        };
-        times.retain(|t| now.duration_since(*t) < self.window);
-        times.len() >= self.max || (global_full && !times.is_empty())
+        let LimiterState {
+            addresses, blocks, ..
+        } = state;
+        let addresses_full = addresses.len() >= MAX_TRACKED;
+        let blocks_full = blocks.len() >= MAX_TRACKED;
+        let block = blocks.get_mut(&block_key(ip)).map(|b| {
+            b.prune(now, window);
+            &*b
+        });
+        if block.is_some_and(|b| b.attempts.len() >= BLOCK_MAX_ATTEMPTS) {
+            return Some(Refusal::TooMany);
+        }
+        match addresses.get_mut(&address_key(ip)) {
+            Some(b) => {
+                b.prune(now, window);
+                if b.attempts.len() >= self.max || (ceiling && b.has_failure()) {
+                    return Some(Refusal::TooMany);
+                }
+            }
+            // Untracked because the table is full: judge the address by its block instead.
+            None if addresses_full => match block {
+                Some(b) if ceiling && b.has_failure() => return Some(Refusal::TooMany),
+                None if blocks_full && ceiling => return Some(Refusal::Busy),
+                _ => {}
+            },
+            None => {}
+        }
+        None
     }
 
-    /// Counts a failed attempt from `ip`.
+    /// Records a rejected attempt from `ip` that was not reserved first.
     pub fn record_failure(&self, ip: IpAddr) {
         let mut state = self.state.lock().expect("limiter lock");
         let now = Instant::now();
         state.prune(now, self.window);
-        Self::push(&mut state, limiter_key(ip), now);
+        state.failures.push_back(now);
+        push(&mut state.addresses, address_key(ip), now, Kind::Failure);
+        push(&mut state.blocks, block_key(ip), now, Kind::Failure);
     }
 
-    fn push(state: &mut LimiterState, key: IpAddr, now: Instant) {
-        state.global.push_back(now);
-        if state.per_key.len() >= MAX_TRACKED_KEYS && !state.per_key.contains_key(&key) {
-            return;
-        }
-        state.per_key.entry(key).or_default().push(now);
-    }
-
-    /// Counts an attempt as a failure before it is checked, so concurrent attempts share the
-    /// limit. `None` when the client is blocked. Give the reservation back with [`Self::refund`]
-    /// when the attempt turns out not to be a failure.
-    pub fn try_reserve(&self, ip: IpAddr) -> Option<Reservation> {
+    /// Counts an attempt before it is checked, so concurrent attempts share the per-client and
+    /// per-block limits. Settle it with [`Self::fail`] if the credential is rejected, otherwise
+    /// with [`Self::refund`]. Until then it does not count toward the global ceiling.
+    pub fn try_reserve(&self, ip: IpAddr) -> Result<Reservation, Refusal> {
         let mut state = self.state.lock().expect("limiter lock");
         let now = Instant::now();
-        let key = limiter_key(ip);
-        if self.blocked(&mut state, key, now) {
-            return None;
+        if let Some(refusal) = self.blocked(&mut state, ip, now) {
+            return Err(refusal);
         }
-        Self::push(&mut state, key, now);
-        Some(Reservation { key, at: now })
+        let address = push(&mut state.addresses, address_key(ip), now, Kind::Pending);
+        let block = push(&mut state.blocks, block_key(ip), now, Kind::Pending);
+        Ok(Reservation {
+            address,
+            block,
+            at: now,
+        })
     }
 
-    /// Removes a reserved attempt again: it was accepted, or could not be checked.
+    /// Gives a reserved attempt back: it was accepted, or could not be checked.
     pub fn refund(&self, reservation: Reservation) {
         let mut state = self.state.lock().expect("limiter lock");
-        if let Some(i) = state.global.iter().rposition(|t| *t == reservation.at) {
-            state.global.remove(i);
+        Self::take(&mut state, &reservation);
+    }
+
+    /// Keeps a reserved attempt as a rejection, counted toward the global ceiling too.
+    pub fn fail(&self, reservation: Reservation) {
+        let mut state = self.state.lock().expect("limiter lock");
+        let now = Instant::now();
+        Self::take(&mut state, &reservation);
+        state.failures.push_back(now);
+        if let Some(k) = reservation.address {
+            state
+                .addresses
+                .entry(k)
+                .or_default()
+                .attempts
+                .push((reservation.at, Kind::Failure));
         }
-        if let Some(times) = state.per_key.get_mut(&reservation.key)
-            && let Some(i) = times.iter().rposition(|t| *t == reservation.at)
-        {
-            times.remove(i);
+        if let Some(k) = reservation.block {
+            state
+                .blocks
+                .entry(k)
+                .or_default()
+                .attempts
+                .push((reservation.at, Kind::Failure));
+        }
+    }
+
+    fn take(state: &mut LimiterState, r: &Reservation) {
+        if let Some(b) = r.address.and_then(|k| state.addresses.get_mut(&k)) {
+            b.take(r.at);
+        }
+        if let Some(b) = r.block.and_then(|k| state.blocks.get_mut(&k)) {
+            b.take(r.at);
         }
     }
 }
 
-/// An attempt counted by [`LoginLimiter::try_reserve`] until it is refunded.
+/// An attempt counted by [`LoginLimiter::try_reserve`] until it is settled.
 #[derive(Debug)]
-#[must_use = "refund the reservation unless the attempt failed"]
+#[must_use = "settle the reservation with fail or refund"]
 pub struct Reservation {
-    key: IpAddr,
+    address: Option<IpAddr>,
+    block: Option<IpAddr>,
     at: Instant,
 }
 
@@ -247,7 +380,7 @@ mod tests {
     fn global_ceiling_blocks_only_clients_that_failed_too() {
         let l = LoginLimiter::new(5, Duration::from_secs(60), Ceiling::BlockFailing);
         for i in 0..GLOBAL_MAX_FAILURES {
-            let ip = IpAddr::from([10, 0, (i / 256) as u8, (i % 256) as u8]);
+            let ip = IpAddr::from([10, (i / 20) as u8, (i % 20) as u8, 1]);
             assert!(!l.is_blocked(ip));
             l.record_failure(ip);
         }
@@ -255,7 +388,7 @@ mod tests {
             !l.is_blocked("192.0.2.1".parse().unwrap()),
             "a clean client is never blocked by other people's failures"
         );
-        assert!(l.is_blocked("10.0.0.0".parse().unwrap()));
+        assert!(l.is_blocked("10.0.0.1".parse().unwrap()));
         let ip: IpAddr = "192.0.2.2".parse().unwrap();
         l.record_failure(ip);
         assert!(
@@ -268,31 +401,95 @@ mod tests {
     fn a_shared_secret_ceiling_blocks_everyone_until_the_window_passes() {
         let l = LoginLimiter::new(5, Duration::from_millis(200), Ceiling::BlockEveryone);
         for i in 0..GLOBAL_MAX_FAILURES {
-            let ip = IpAddr::from([10, 0, (i / 256) as u8, (i % 256) as u8]);
-            l.record_failure(ip);
+            l.record_failure(IpAddr::from([10, (i / 20) as u8, (i % 20) as u8, 1]));
         }
         let clean: IpAddr = "192.0.2.1".parse().unwrap();
         assert!(l.is_blocked(clean), "the owner waits too");
-        assert!(l.try_reserve(clean).is_none());
+        assert_eq!(l.try_reserve(clean).unwrap_err(), Refusal::TooMany);
         std::thread::sleep(Duration::from_millis(250));
         assert!(!l.is_blocked(clean));
     }
 
     #[test]
-    fn untracked_addresses_are_blocked_once_the_table_is_full_and_the_ceiling_reached() {
+    fn checks_in_flight_never_count_toward_the_ceiling() {
         let l = LoginLimiter::new(5, Duration::from_secs(60), Ceiling::BlockFailing);
-        for i in 0..MAX_TRACKED_KEYS as u32 {
+        let held: Vec<_> = (0..40u8)
+            .map(|i| l.try_reserve(IpAddr::from([10, i, 0, 1])).expect("allowed"))
+            .collect();
+        assert_eq!(l.state.lock().unwrap().failures.len(), 0);
+        let failed: IpAddr = "192.0.2.3".parse().unwrap();
+        l.record_failure(failed);
+        assert!(
+            !l.is_blocked(failed),
+            "40 checks in flight are not 30 rejections"
+        );
+        for r in held {
+            l.refund(r);
+        }
+    }
+
+    #[test]
+    fn a_rejected_reservation_becomes_a_failure() {
+        let l = LoginLimiter::new(5, Duration::from_secs(60), Ceiling::BlockFailing);
+        let ip: IpAddr = "10.0.0.9".parse().unwrap();
+        let r = l.try_reserve(ip).unwrap();
+        l.fail(r);
+        let state = l.state.lock().unwrap();
+        assert_eq!(state.failures.len(), 1);
+        assert!(state.addresses[&address_key(ip)].has_failure());
+        assert_eq!(state.addresses[&address_key(ip)].attempts.len(), 1);
+    }
+
+    #[test]
+    fn one_wider_block_cannot_spread_over_many_addresses() {
+        let l = LoginLimiter::new(5, Duration::from_secs(60), Ceiling::BlockFailing);
+        for i in 0..BLOCK_MAX_ATTEMPTS as u16 {
+            let ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, i, 0, 0, 0, 1));
+            let _ = l.try_reserve(ip).expect("each /64 tries once");
+        }
+        let same_block = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 999, 0, 0, 0, 1));
+        assert_eq!(l.try_reserve(same_block).unwrap_err(), Refusal::TooMany);
+        let other_block = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 1));
+        assert!(l.try_reserve(other_block).is_ok());
+        let v4: Vec<_> = (0..BLOCK_MAX_ATTEMPTS as u8)
+            .map(|i| l.try_reserve(IpAddr::from([198, 51, 100, i])).unwrap())
+            .collect();
+        assert_eq!(
+            l.try_reserve("198.51.100.250".parse().unwrap())
+                .unwrap_err(),
+            Refusal::TooMany,
+            "an IPv4 /24 is one block"
+        );
+        for r in v4 {
+            l.refund(r);
+        }
+    }
+
+    #[test]
+    fn a_full_table_judges_new_addresses_by_their_block() {
+        let l = LoginLimiter::new(5, Duration::from_secs(60), Ceiling::BlockFailing);
+        // 10,000 failing addresses in 40 /24s fill the address table and reach the ceiling.
+        for i in 0..MAX_TRACKED as u32 {
             l.record_failure(IpAddr::from(i.to_be_bytes()));
         }
-        let fresh: IpAddr = "203.0.113.7".parse().unwrap();
-        assert!(l.is_blocked(fresh));
-        assert!(l.try_reserve(fresh).is_none());
-        // Below the tracking limit a fresh address stays free, as before.
+        assert!(
+            !l.is_blocked("203.0.113.7".parse().unwrap()),
+            "a new address in a clean block still gets in"
+        );
+        assert_eq!(
+            l.refusal("0.0.39.200".parse().unwrap()),
+            Some(Refusal::TooMany),
+            "a new address in a failing block does not"
+        );
+        // 10,000 failing blocks fill the block table too: new blocks can't be told apart.
         let l = LoginLimiter::new(5, Duration::from_secs(60), Ceiling::BlockFailing);
-        for i in 0..GLOBAL_MAX_FAILURES as u32 {
-            l.record_failure(IpAddr::from(i.to_be_bytes()));
+        for i in 0..MAX_TRACKED as u32 {
+            l.record_failure(IpAddr::from((i << 8).to_be_bytes()));
         }
-        assert!(!l.is_blocked(fresh));
+        assert_eq!(
+            l.refusal("203.0.113.7".parse().unwrap()),
+            Some(Refusal::Busy)
+        );
     }
 
     #[test]
@@ -302,26 +499,32 @@ mod tests {
         let held: Vec<_> = (0..3)
             .map(|_| l.try_reserve(ip).expect("allowed"))
             .collect();
-        assert!(l.try_reserve(ip).is_none(), "in-flight attempts count");
+        assert_eq!(
+            l.try_reserve(ip).unwrap_err(),
+            Refusal::TooMany,
+            "in-flight attempts count"
+        );
         for r in held {
             l.refund(r);
         }
         assert!(!l.is_blocked(ip));
         let r = l.try_reserve(ip).unwrap();
         l.refund(r);
-        assert_eq!(l.state.lock().unwrap().global.len(), 0);
+        let state = l.state.lock().unwrap();
+        assert!(state.addresses.values().all(|b| b.attempts.is_empty()));
+        assert!(state.failures.is_empty());
     }
 
     #[test]
-    fn tracked_keys_are_capped_but_still_count_globally() {
+    fn tracked_addresses_are_capped_but_still_count_globally() {
         let l = LoginLimiter::new(1, Duration::from_secs(60), Ceiling::BlockFailing);
-        for i in 0..MAX_TRACKED_KEYS as u32 + 5 {
+        for i in 0..MAX_TRACKED as u32 + 5 {
             let ip = IpAddr::from(i.to_be_bytes());
             l.record_failure(ip);
         }
         let state = l.state.lock().unwrap();
-        assert_eq!(state.per_key.len(), MAX_TRACKED_KEYS);
-        assert_eq!(state.global.len(), MAX_TRACKED_KEYS + 5);
+        assert_eq!(state.addresses.len(), MAX_TRACKED);
+        assert_eq!(state.failures.len(), MAX_TRACKED + 5);
     }
 
     #[test]

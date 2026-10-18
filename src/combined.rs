@@ -3,7 +3,8 @@
 //! Each service's tools and prompts appear as `<service>_<name>`; a call is routed by that
 //! prefix to the service's handler with the original name. A forwarded `prompts/get` carries
 //! [`ToolPrefix`] so the service names its tools as they are called here (see
-//! [`crate::prompt::tool_prefix`]). [`DynHandler`] erases a handler's type so handlers of
+//! [`crate::prompt::tool_prefix`]); any tool name the prompt's text still has bare is prefixed
+//! here, so a prompt written for `/<service>` works on `/mcp` unchanged. [`DynHandler`] erases a handler's type so handlers of
 //! different services fit in one list. Calls keep their request context, so tools read the
 //! caller's credential from the request extensions exactly as on `/<service>`.
 //!
@@ -11,9 +12,9 @@
 
 use crate::prompt::{ToolPrefix, not_found};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
-    Implementation, ListPromptsResult, ListToolsResult, PaginatedRequestParams, Prompt,
-    PromptsCapability, ServerCapabilities, ServerConfig, Tool,
+    CallToolRequestParams, CallToolResponse, ContentBlock, GetPromptRequestParams,
+    GetPromptResponse, Implementation, ListPromptsResult, ListToolsResult, PaginatedRequestParams,
+    Prompt, PromptsCapability, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler};
@@ -162,6 +163,33 @@ fn prefixed(service: &str, mut tool: Tool) -> Tool {
     tool
 }
 
+/// Gives every whole identifier in `text` that is one of `tools` its service prefix, so a
+/// prompt written for `/<service>` names the tools as `/mcp` lists them. Identifiers are runs of
+/// ASCII letters, digits and `_`, so `get_company` inside `get_company_registers` (or an already
+/// prefixed `companies_get_company`) is left alone.
+fn prefix_tool_names(service: &str, tools: &[String], text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if tools.iter().any(|t| t == word) {
+            out.push_str(&prefixed_name(service, word));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 fn prefixed_prompt(service: &str, mut prompt: Prompt) -> Prompt {
     prompt.name = prefixed_name(service, &prompt.name);
     prompt
@@ -188,7 +216,7 @@ fn split<'a>(services: &[&str], name: &'a str) -> Option<(usize, &'a str)> {
 fn instructions(services: &[(&str, Option<String>)]) -> String {
     let prefixes: Vec<String> = services.iter().map(|(s, _)| format!("{s}_")).collect();
     let mut text = format!(
-        "This server combines several services. Each tool name starts with its service: {}. \
+        "This server combines several services. Each tool and prompt name starts with its service: {}. \
          The notes below, tool descriptions and error messages name tools without that prefix.",
         prefixes.join(", ")
     );
@@ -285,7 +313,8 @@ impl ServerHandler for Combined {
     }
 
     /// Routes by prefix and tells the service, through [`ToolPrefix`], to name its tools with
-    /// the same prefix. An unknown prompt is reported with the name the client sent.
+    /// the same prefix; any of its tool names the prompt's text still has bare get the prefix
+    /// here. An unknown prompt is reported with the name the client sent.
     async fn get_prompt(
         &self,
         mut request: GetPromptRequestParams,
@@ -296,13 +325,31 @@ impl ServerHandler for Combined {
         };
         let prompt = prompt.to_string();
         let full = std::mem::replace(&mut request.name, prompt.clone());
+        let service = self.names[index];
+        let handler = &self.handlers[index];
         context
             .extensions
-            .insert(ToolPrefix(prefixed_name(self.names[index], "")));
-        self.handlers[index]
-            .get_prompt(request, context)
+            .insert(ToolPrefix(prefixed_name(service, "")));
+        let response = handler
+            .get_prompt(request, context.clone())
             .await
-            .map_err(|e| with_full_name(e, &prompt, &full))
+            .map_err(|e| with_full_name(e, &prompt, &full))?;
+        let GetPromptResponse::Complete(mut result) = response else {
+            return Ok(response);
+        };
+        let tools: Vec<String> = handler
+            .list_tools(None, context)
+            .await?
+            .tools
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for message in &mut result.messages {
+            if let ContentBlock::Text(t) = &mut message.content {
+                t.text = prefix_tool_names(service, &tools, &t.text);
+            }
+        }
+        Ok(GetPromptResponse::Complete(result))
     }
 }
 
@@ -347,9 +394,24 @@ mod tests {
         ]);
         assert_eq!(
             text,
-            "This server combines several services. Each tool name starts with its service: \
+            "This server combines several services. Each tool and prompt name starts with its service: \
 companies_, streaming_, filing_. The notes below, tool descriptions and error messages name \
 tools without that prefix.\n\ncompanies:\nFind companies.\n\nfiling:\nFile changes."
+        );
+    }
+
+    #[test]
+    fn tool_names_in_prompt_text_get_their_prefix() {
+        let tools = vec!["get_company".to_string(), "list_officers".to_string()];
+        assert_eq!(
+            prefix_tool_names(
+                "companies",
+                &tools,
+                "Call get_company, then list_officers (not get_company_registers, my_get_company \
+                 or companies_get_company)."
+            ),
+            "Call companies_get_company, then companies_list_officers (not get_company_registers, \
+             my_get_company or companies_get_company)."
         );
     }
 

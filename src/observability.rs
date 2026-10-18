@@ -84,21 +84,25 @@ pub fn build_filter(level: &str, debug: bool, crate_target: &str) -> String {
     format!("{level},{crate_target}=debug,mcp_server_core=debug")
 }
 
+/// Log levels from least to most verbose.
+const LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
+
 /// Rewrites a `LOG_LEVEL` filter so it cannot reveal secrets: every target in `caps` (and its
-/// children) is set to info whatever the filter says, and the rmcp targets in
-/// [`QUIET_LOG_TARGETS`](crate::service::QUIET_LOG_TARGETS), which log MCP session ids, to warn.
+/// children) is capped at info and the rmcp targets in
+/// [`QUIET_LOG_TARGETS`](crate::service::QUIET_LOG_TARGETS), which log MCP session ids, at warn.
+/// Caps only ever lower a target: never above what `LOG_LEVEL` sets for everything. Every target
+/// in `always_on` is set to info whatever `LOG_LEVEL` says, which is how the audit log stays on.
 /// Span-scoped directives (containing `[`) are dropped, as they could re-enable a capped target.
-///
-/// Setting a target to info also keeps it on when the filter is quieter, which is how the audit
-/// target stays enabled at any level.
 ///
 /// ```
 /// use mcp_server_core::observability::log_filter;
 ///
-/// let filter = log_filter("trace,noisy_dep=trace", &["noisy_dep"]);
+/// let filter = log_filter("trace,noisy_dep=trace", &["noisy_dep"], &["audit"]);
 /// assert!(filter.starts_with("trace,noisy_dep=info,"));
+/// assert!(log_filter("error", &["noisy_dep"], &[]).contains("noisy_dep=error"));
+/// assert!(log_filter("off", &[], &["audit"]).contains("audit=info"));
 /// ```
-pub fn log_filter(level: &str, caps: &[&str]) -> String {
+pub fn log_filter(level: &str, caps: &[&str], always_on: &[&str]) -> String {
     use crate::service::QUIET_LOG_TARGETS;
     let mut parts: Vec<String> = level
         .split(',')
@@ -108,13 +112,33 @@ pub fn log_filter(level: &str, caps: &[&str]) -> String {
                 && !d.contains('[')
                 && !caps
                     .iter()
+                    .chain(always_on)
                     .chain(QUIET_LOG_TARGETS)
                     .any(|c| d.starts_with(c))
         })
         .map(String::from)
         .collect();
-    parts.extend(caps.iter().map(|c| format!("{c}=info")));
-    parts.extend(QUIET_LOG_TARGETS.iter().map(|t| format!("{t}=warn")));
+    let global = level
+        .split(',')
+        .map(str::trim)
+        .rfind(|d| LEVELS.contains(&d.to_ascii_lowercase().as_str()))
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "off".into());
+    let cap = |max: &str| -> String {
+        let rank = |l: &str| LEVELS.iter().position(|x| *x == l).unwrap_or(0);
+        if rank(&global) < rank(max) {
+            global.clone()
+        } else {
+            max.to_string()
+        }
+    };
+    parts.extend(caps.iter().map(|c| format!("{c}={}", cap("info"))));
+    parts.extend(always_on.iter().map(|c| format!("{c}=info")));
+    parts.extend(
+        QUIET_LOG_TARGETS
+            .iter()
+            .map(|t| format!("{t}={}", cap("warn"))),
+    );
     parts.join(",")
 }
 
@@ -258,19 +282,34 @@ mod tests {
     #[test]
     fn log_filter_caps_every_listed_target() {
         assert_eq!(
-            log_filter("trace,a=trace,b::x=debug", &["a", "b"]),
+            log_filter("trace,a=trace,b::x=debug", &["a", "b"], &[]),
             format!("trace,a=info,b=info,{Q}")
         );
-        assert_eq!(log_filter("warn", &[]), format!("warn,{Q}"));
-        assert_eq!(log_filter("", &["a"]), format!("a=info,{Q}"));
         assert_eq!(
-            log_filter("info,[{x}]=trace,[x]=trace,debug", &["a"]),
+            log_filter("warn", &[], &[]),
+            "warn,rmcp::transport::streamable_http_server=warn,rmcp::transport::worker=warn"
+        );
+        assert_eq!(
+            log_filter("info,[{x}]=trace,[x]=trace,debug", &["a"], &[]),
             format!("info,debug,a=info,{Q}")
         );
         assert_eq!(
-            log_filter("debug,a=trace,a::client=trace", &["a"]),
+            log_filter("debug,a=trace,a::client=trace", &["a"], &[]),
             format!("debug,a=info,{Q}")
         );
+    }
+
+    #[test]
+    fn caps_never_raise_a_target_above_log_level() {
+        assert_eq!(
+            log_filter("error", &["a"], &[]),
+            "error,a=error,rmcp::transport::streamable_http_server=error,rmcp::transport::worker=error"
+        );
+        assert_eq!(
+            log_filter("off", &[], &[]),
+            "off,rmcp::transport::streamable_http_server=off,rmcp::transport::worker=off"
+        );
+        assert!(log_filter("b=debug", &["a"], &[]).contains("a=off"));
     }
 
     #[test]
@@ -278,6 +317,7 @@ mod tests {
         use tracing::Level;
         let filter = log_filter(
             "trace,rmcp=trace,rmcp::transport::streamable_http_server::session::local=trace",
+            &[],
             &[],
         );
         let subscriber = tracing_subscriber::registry().with(EnvFilter::new(filter));
@@ -304,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn a_capped_target_stays_on_at_info_at_any_level() {
+    fn an_always_on_target_stays_on_at_info_at_any_level() {
         use tracing::Level;
         for level in [
             "warn",
@@ -313,7 +353,8 @@ mod tests {
             "info,audit=off",
             "trace,audit=error",
         ] {
-            let directives = build_filter(&log_filter(level, &["audit"]), false, "mcp_example");
+            let directives =
+                build_filter(&log_filter(level, &[], &["audit"]), false, "mcp_example");
             let subscriber = tracing_subscriber::registry().with(EnvFilter::new(directives));
             tracing::subscriber::with_default(subscriber, || {
                 assert!(tracing::enabled!(target: "audit", Level::INFO), "{level}");
@@ -324,7 +365,7 @@ mod tests {
     #[test]
     fn debug_covers_own_crates_but_not_capped_ones() {
         use tracing::Level;
-        let level = log_filter("trace", &["noisy_dep"]);
+        let level = log_filter("trace", &["noisy_dep"], &[]);
         let directives = build_filter(&level, true, "mcp_example");
         let subscriber = tracing_subscriber::registry().with(EnvFilter::new(directives));
         tracing::subscriber::with_default(subscriber, || {

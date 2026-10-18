@@ -491,7 +491,8 @@ async fn failures_spread_over_many_addresses_lock_out_even_the_owner_for_a_while
     let app = app(st.clone());
     let html = login_page(&app, &client_id(&st)).await;
     for i in 0..mcp_server_core::guards::GLOBAL_MAX_FAILURES {
-        let peer = [10, 9, (i / 256) as u8, (i % 256) as u8];
+        // One address in each of 30 different /24s, so no block's own limit is reached.
+        let peer = [10, (i + 1) as u8, 9, 1];
         let pairs = form_fields(&html, "nope");
         let pairs: Vec<(&str, &str)> = pairs
             .iter()

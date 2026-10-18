@@ -516,14 +516,12 @@ impl Server {
         }
     }
 
-    /// The log caps: every service's, and the audit target kept on at info.
+    /// Every service's log caps.
     pub fn log_caps(services: &[Arc<dyn Service>]) -> Vec<&'static str> {
-        let mut caps: Vec<&'static str> = services
+        services
             .iter()
             .flat_map(|s| s.log_caps().iter().copied())
-            .collect();
-        caps.push(AUDIT_TARGET);
-        caps
+            .collect()
     }
 
     /// The tool names `/mcp` offers, in order.
@@ -541,8 +539,11 @@ impl Server {
     /// Starts logging and serves `loaded` until Ctrl-C or SIGTERM.
     pub async fn run(&self, loaded: Loaded) -> anyhow::Result<()> {
         let mut obs = loaded.core.observability.clone();
-        obs.log_level =
-            observability::log_filter(&obs.log_level, &Self::log_caps(&loaded.services));
+        obs.log_level = observability::log_filter(
+            &obs.log_level,
+            &Self::log_caps(&loaded.services),
+            &[AUDIT_TARGET],
+        );
         let _guard = observability::init(&obs)?;
         tracing::info!(version = self.version, "starting {}", self.name);
         for w in &loaded.warnings {
@@ -1046,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn log_caps_keep_the_audit_target_on() {
-        assert_eq!(Server::log_caps(&[]), vec![AUDIT_TARGET]);
+    fn log_caps_are_the_services_own() {
+        assert!(Server::log_caps(&[]).is_empty());
     }
 }

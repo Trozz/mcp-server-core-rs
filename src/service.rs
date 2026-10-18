@@ -188,8 +188,10 @@ const SESSION_HEADER: &str = "mcp-session-id";
 /// Bounds on the session-owner table of one mount.
 #[derive(Debug, Clone, Copy)]
 struct SessionLimits {
-    /// Sessions remembered at once. When full, entries of sessions rmcp has ended are dropped;
-    /// if none has ended, new sessions are refused rather than pushing out someone else's.
+    /// Sessions remembered at once. When full, idle entries and those of sessions rmcp has ended
+    /// are swept first; then the owner holding the most (more than the newcomer's count plus
+    /// one) gives up its least recently used session, or a newcomer holding at least as many as
+    /// anyone else gives up its own. Only when shares are about even are new sessions refused.
     total: usize,
     /// Sessions one credential may hold; opening another closes its own least recently used one.
     per_owner: usize,
@@ -213,23 +215,105 @@ impl SessionLimits {
 struct SessionOwners {
     manager: Arc<LocalSessionManager>,
     limits: SessionLimits,
-    sessions: Mutex<HashMap<String, Owner>>,
+    table: Mutex<Table>,
 }
 
-/// The fingerprint of the credential that opened a session (none without a guard), and when the
-/// session was last used.
-type Owner = (Option<[u8; 32]>, Instant);
+/// The fingerprint of the credential that opened a session (none without a guard).
+type Who = Option<[u8; 32]>;
+
+#[derive(Default)]
+struct Table {
+    /// Session id to its owner and last use.
+    sessions: HashMap<String, (Who, Instant)>,
+    /// Sessions held per owner.
+    counts: HashMap<Who, usize>,
+    /// When the full table was last swept for idle and ended sessions.
+    last_sweep: Option<Instant>,
+}
+
+impl Table {
+    fn insert(&mut self, id: String, who: Who, now: Instant) {
+        if self.sessions.insert(id, (who, now)).is_none() {
+            *self.counts.entry(who).or_default() += 1;
+        }
+    }
+
+    fn remove(&mut self, id: &str) -> bool {
+        let Some((who, _)) = self.sessions.remove(id) else {
+            return false;
+        };
+        if let Some(n) = self.counts.get_mut(&who) {
+            *n -= 1;
+            if *n == 0 {
+                self.counts.remove(&who);
+            }
+        }
+        true
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&str, &(Who, Instant)) -> bool) {
+        self.sessions.retain(|k, v| keep(k, v));
+        self.counts.clear();
+        for (who, _) in self.sessions.values() {
+            *self.counts.entry(*who).or_default() += 1;
+        }
+    }
+
+    fn count(&self, who: Who) -> usize {
+        self.counts.get(&who).copied().unwrap_or(0)
+    }
+
+    /// The least recently used session of `who`.
+    fn oldest_of(&self, who: Who) -> Option<String> {
+        self.sessions
+            .iter()
+            .filter(|(_, (owner, _))| *owner == who)
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// The owner, other than `who`, holding the most sessions, and how many.
+    fn largest_other(&self, who: Who) -> Option<(Who, usize)> {
+        self.counts
+            .iter()
+            .filter(|(owner, _)| **owner != who)
+            .max_by_key(|(_, n)| **n)
+            .map(|(owner, n)| (*owner, *n))
+    }
+
+    /// Whether a new session for `who` could get a slot in a full table by taking one from
+    /// whoever holds the most, so that everyone tends toward an equal share.
+    fn fair_share_room(&self, who: Who) -> Option<Who> {
+        let mine = self.count(who);
+        self.largest_other(who)
+            .filter(|(_, n)| *n > mine + 1)
+            .map(|(owner, _)| owner)
+    }
+
+    /// Whose least recently used session makes room for a new one of `who` in a full table:
+    /// whoever holds clearly more, or else `who` itself when it holds any, so a key that already
+    /// has sessions replaces its own instead of being refused or pushing someone else out.
+    fn room_for(&self, who: Who) -> Option<Who> {
+        self.fair_share_room(who)
+            .or_else(|| (who.is_some() && self.count(who) > 0).then_some(who))
+    }
+}
+
+/// Whether a request may use the session it names.
+#[derive(Debug, PartialEq, Eq)]
+enum Ownership {
+    Owner,
+    NotOwner,
+    /// The owner's entry has not been used for a while; ask rmcp whether the session lives.
+    Stale,
+}
 
 /// What [`SessionOwners::admit`] decided about a new session.
 #[derive(Debug, PartialEq, Eq)]
-enum Admission {
-    /// Recorded. These sessions were dropped to make room and should be closed.
-    Admitted(Vec<String>),
-    /// The table is full of entries that may still be live: the caller should look up which
-    /// sessions rmcp still holds and ask again.
-    NeedLiveSessions,
-    /// Full of live sessions: refuse the new one.
-    Full,
+struct Admission {
+    admitted: bool,
+    /// Sessions dropped to make room, to be closed in rmcp.
+    dropped: Vec<String>,
 }
 
 impl SessionOwners {
@@ -237,80 +321,109 @@ impl SessionOwners {
         SessionOwners {
             manager,
             limits,
-            sessions: Mutex::new(HashMap::new()),
+            table: Mutex::new(Table::default()),
         }
     }
 
-    /// Whether `who` opened session `id`; refreshes its last use when it did.
-    fn owned_by(&self, id: &str, who: Option<[u8; 32]>) -> bool {
+    fn table(&self) -> std::sync::MutexGuard<'_, Table> {
+        self.table.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn owned_by(&self, id: &str, who: Who) -> Ownership {
         let now = Instant::now();
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        match sessions.get_mut(id) {
-            Some((owner, used)) if now.duration_since(*used) < self.limits.idle => {
-                if *owner == who {
-                    *used = now;
-                    true
-                } else {
-                    false
-                }
+        let mut table = self.table();
+        match table.sessions.get_mut(id) {
+            Some((owner, _)) if *owner != who => Ownership::NotOwner,
+            Some((_, used)) if now.duration_since(*used) < self.limits.idle => {
+                *used = now;
+                Ownership::Owner
             }
-            Some(_) => {
-                sessions.remove(id);
-                false
-            }
-            None => false,
+            Some(_) => Ownership::Stale,
+            None => Ownership::NotOwner,
         }
+    }
+
+    /// Marks session `id` as used now, if `who` owns it.
+    fn touch(&self, id: &str, who: Who) {
+        if let Some((owner, used)) = self.table().sessions.get_mut(id)
+            && *owner == who
+        {
+            *used = Instant::now();
+        }
+    }
+
+    /// Whether a full table is due a sweep, which needs the sessions rmcp still holds.
+    fn wants_live_sessions(&self) -> bool {
+        let table = self.table();
+        table.sessions.len() >= self.limits.total && self.sweep_due(&table)
+    }
+
+    fn sweep_due(&self, table: &Table) -> bool {
+        table.last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY)
+    }
+
+    /// Whether a new session for `who` would be refused, judged cheaply before rmcp builds it:
+    /// the table is full, was swept moments ago, and no one holds more than their share.
+    fn refuse_early(&self, who: Who) -> bool {
+        let table = self.table();
+        table.sessions.len() >= self.limits.total
+            && !self.sweep_due(&table)
+            && !(who.is_some() && table.count(who) >= self.limits.per_owner)
+            && table.room_for(who).is_none()
     }
 
     /// Records a new session `id` opened by `who`. `live` is the set of sessions rmcp still
-    /// holds, needed only when the table is full.
+    /// holds, when [`Self::wants_live_sessions`] asked for it.
     fn admit(
         &self,
         id: &str,
-        who: Option<[u8; 32]>,
+        who: Who,
         live: Option<&std::collections::HashSet<String>>,
     ) -> Admission {
         let now = Instant::now();
         let limits = self.limits;
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut table = self.table();
         let mut dropped = Vec::new();
+        // One owner never holds more than its cap: its own oldest session makes room.
         if who.is_some() {
-            let mut own: Vec<(String, Instant)> = sessions
-                .iter()
-                .filter(|(_, (owner, _))| *owner == who)
-                .map(|(k, (_, used))| (k.clone(), *used))
-                .collect();
-            if own.len() >= limits.per_owner {
-                // Make room for the new one by closing this owner's least recently used.
-                own.sort_by_key(|(_, used)| *used);
-                let excess = own.len() + 1 - limits.per_owner;
-                for (k, _) in own.into_iter().take(excess) {
-                    sessions.remove(&k);
-                    dropped.push(k);
-                }
+            while table.count(who) >= limits.per_owner {
+                let Some(oldest) = table.oldest_of(who) else {
+                    break;
+                };
+                table.remove(&oldest);
+                dropped.push(oldest);
             }
         }
-        if sessions.len() >= limits.total {
-            sessions.retain(|_, (_, used)| now.duration_since(*used) < limits.idle);
+        if table.sessions.len() >= limits.total && self.sweep_due(&table) {
+            table.retain(|_, (_, used)| now.duration_since(*used) < limits.idle);
+            if let Some(live) = live {
+                table.retain(|k, _| live.contains(k));
+            }
+            table.last_sweep = Some(now);
         }
-        if sessions.len() >= limits.total {
-            let Some(live) = live else {
-                return Admission::NeedLiveSessions;
+        if table.sessions.len() >= limits.total {
+            // Take a slot from whoever holds the most, never from someone with fewer than
+            // the newcomer would have.
+            let Some(owner) = table.room_for(who) else {
+                return Admission {
+                    admitted: false,
+                    dropped,
+                };
             };
-            sessions.retain(|k, _| live.contains(k));
+            if let Some(oldest) = table.oldest_of(owner) {
+                table.remove(&oldest);
+                dropped.push(oldest);
+            }
         }
-        if sessions.len() >= limits.total {
-            return Admission::Full;
+        table.insert(id.to_owned(), who, now);
+        Admission {
+            admitted: true,
+            dropped,
         }
-        sessions.insert(id.to_owned(), (who, now));
-        Admission::Admitted(dropped)
     }
 
     fn remove(&self, id: &str) {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(id);
+        self.table().remove(id);
     }
 
     async fn live_sessions(&self) -> std::collections::HashSet<String> {
@@ -323,10 +436,30 @@ impl SessionOwners {
             .collect()
     }
 
+    async fn is_live(&self, id: &str) -> bool {
+        self.manager.sessions.read().await.contains_key(id)
+    }
+
     async fn close(&self, id: &str) {
         use rmcp::transport::streamable_http_server::session::SessionManager as _;
         let _ = self.manager.close_session(&Arc::from(id)).await;
     }
+}
+
+/// The full table is swept for idle and ended sessions at most this often.
+const SWEEP_EVERY: Duration = Duration::from_secs(1);
+
+fn too_many_sessions() -> Response {
+    let mut busy = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "This server has too many open sessions. Try again shortly.",
+    )
+        .into_response();
+    busy.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("30"),
+    );
+    busy
 }
 
 /// Records the credential that opens a session, and answers 404 (as for an unknown session, so
@@ -346,10 +479,25 @@ async fn bind_sessions(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let delete = req.method() == Method::DELETE;
-    if let Some(id) = &session
-        && !owners.owned_by(id, who)
-    {
-        return (StatusCode::NOT_FOUND, "Session not found").into_response();
+    match &session {
+        Some(id) => match owners.owned_by(id, who) {
+            Ownership::Owner => {}
+            Ownership::NotOwner => {
+                return (StatusCode::NOT_FOUND, "Session not found").into_response();
+            }
+            // Quiet for a while, as during a long tool call: still the owner's if rmcp has
+            // kept the session.
+            Ownership::Stale => {
+                if owners.is_live(id).await {
+                    owners.touch(id, who);
+                } else {
+                    owners.remove(id);
+                    return (StatusCode::NOT_FOUND, "Session not found").into_response();
+                }
+            }
+        },
+        None if owners.refuse_early(who) => return too_many_sessions(),
+        None => {}
     }
     let res = next.run(req).await;
     match session {
@@ -362,31 +510,30 @@ async fn bind_sessions(
             else {
                 return res;
             };
-            let mut admission = owners.admit(&id, who, None);
-            if admission == Admission::NeedLiveSessions {
-                let live = owners.live_sessions().await;
-                admission = owners.admit(&id, who, Some(&live));
-            }
-            match admission {
-                Admission::Admitted(dropped) => {
-                    for old in dropped {
-                        owners.close(&old).await;
+            // Decided and cleaned up in a task of its own, so the table and rmcp stay in step
+            // even if the client goes away meanwhile.
+            let task = tokio::spawn({
+                let owners = owners.clone();
+                async move {
+                    let live = if owners.wants_live_sessions() {
+                        Some(owners.live_sessions().await)
+                    } else {
+                        None
+                    };
+                    let admission = owners.admit(&id, who, live.as_ref());
+                    for old in &admission.dropped {
+                        owners.close(old).await;
                     }
-                    res
+                    if !admission.admitted {
+                        owners.close(&id).await;
+                    }
+                    admission.admitted
                 }
-                Admission::NeedLiveSessions | Admission::Full => {
-                    owners.close(&id).await;
-                    let mut busy = (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "This server has too many open sessions. Try again shortly.",
-                    )
-                        .into_response();
-                    busy.headers_mut().insert(
-                        axum::http::header::RETRY_AFTER,
-                        axum::http::HeaderValue::from_static("30"),
-                    );
-                    busy
-                }
+            });
+            if task.await.unwrap_or(false) {
+                res
+            } else {
+                too_many_sessions()
             }
         }
         Some(id) if delete && res.status().is_success() => {
@@ -445,56 +592,149 @@ mod tests {
         )
     }
 
+    fn ok(dropped: &[&str]) -> Admission {
+        Admission {
+            admitted: true,
+            dropped: dropped.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn live(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn one_owner_cannot_hold_more_than_its_share() {
         let o = owners(100, 3);
         let (alice, bob) = (Some([1; 32]), Some([2; 32]));
-        assert_eq!(o.admit("a1", alice, None), Admission::Admitted(vec![]));
+        assert_eq!(o.admit("a1", alice, None), ok(&[]));
         for i in 0..3 {
-            assert_eq!(
-                o.admit(&format!("b{i}"), bob, None),
-                Admission::Admitted(vec![])
-            );
+            assert_eq!(o.admit(&format!("b{i}"), bob, None), ok(&[]));
         }
         assert_eq!(
             o.admit("b3", bob, None),
-            Admission::Admitted(vec!["b0".into()]),
+            ok(&["b0"]),
             "Bob's own oldest session makes room"
         );
-        assert!(o.owned_by("a1", alice), "Alice is untouched");
-        assert!(!o.owned_by("b0", bob));
-        assert!(o.owned_by("b3", bob));
+        assert_eq!(
+            o.owned_by("a1", alice),
+            Ownership::Owner,
+            "Alice is untouched"
+        );
+        assert_eq!(o.owned_by("b0", bob), Ownership::NotOwner);
+        assert_eq!(o.owned_by("b3", bob), Ownership::Owner);
+        assert_eq!(o.owned_by("b3", alice), Ownership::NotOwner);
     }
 
     #[test]
-    fn a_full_table_keeps_live_sessions_and_refuses_new_ones() {
+    fn a_full_table_frees_ended_sessions_first() {
         let o = owners(3, 10);
         for (i, who) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
-            assert_eq!(
-                o.admit(&format!("s{i}"), Some(who), None),
-                Admission::Admitted(vec![])
-            );
+            assert_eq!(o.admit(&format!("s{i}"), Some(who), None), ok(&[]));
         }
+        assert!(o.wants_live_sessions());
         assert_eq!(
-            o.admit("new", Some([4; 32]), None),
-            Admission::NeedLiveSessions
+            o.admit("new", Some([4; 32]), Some(&live(&["s0", "s2"]))),
+            ok(&[]),
+            "the session rmcp has ended makes room"
         );
-        let all: std::collections::HashSet<String> =
-            ["s0", "s1", "s2"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(o.admit("new", Some([4; 32]), Some(&all)), Admission::Full);
+        assert_eq!(o.owned_by("s1", Some([2; 32])), Ownership::NotOwner);
+        assert_eq!(o.owned_by("new", Some([4; 32])), Ownership::Owner);
+    }
+
+    #[test]
+    fn a_full_table_takes_room_from_whoever_holds_most() {
+        let o = owners(4, 3);
+        let (a, b, c) = (Some([1; 32]), Some([2; 32]), Some([3; 32]));
+        for id in ["a1", "a2", "a3"] {
+            assert_eq!(o.admit(id, a, None), ok(&[]));
+        }
+        assert_eq!(o.admit("b1", b, None), ok(&[]));
+        let all = live(&["a1", "a2", "a3", "b1"]);
+        assert_eq!(
+            o.admit("c1", c, Some(&all)),
+            ok(&["a1"]),
+            "the largest holder gives up its oldest"
+        );
+        assert_eq!(
+            o.owned_by("b1", b),
+            Ownership::Owner,
+            "Bob's only session is kept"
+        );
+        // Now a holds 2, b 1, c 1: c's next takes from a, d's from a, and then shares are even.
+        assert_eq!(o.admit("d1", Some([4; 32]), None), ok(&["a2"]));
+        assert_eq!(
+            o.admit("e1", Some([5; 32]), None),
+            Admission {
+                admitted: false,
+                dropped: vec![]
+            },
+            "everyone holds one: nobody is pushed out for a newcomer"
+        );
         assert!(
-            o.owned_by("s0", Some([1; 32])),
-            "nobody's live session is pushed out"
+            o.refuse_early(Some([6; 32])),
+            "and the next is refused cheaply"
         );
-        let some: std::collections::HashSet<String> =
-            ["s0", "s2"].iter().map(|s| s.to_string()).collect();
+        // An owner at its cap in a full table can still swap one of its own.
+        let o = owners(2, 1);
+        o.admit("a1", a, None);
+        o.admit("b1", b, None);
+        assert!(!o.admit("c1", c, Some(&live(&["a1", "b1"]))).admitted);
+        assert!(o.refuse_early(c));
+        assert!(!o.refuse_early(a));
+        assert_eq!(o.admit("a2", a, None), ok(&["a1"]));
+    }
+
+    #[test]
+    fn the_largest_holder_below_its_cap_replaces_its_own_sessions() {
+        let o = owners(4, 10);
+        let (a, b) = (Some([1; 32]), Some([2; 32]));
+        for id in ["a1", "a2", "a3"] {
+            assert_eq!(o.admit(id, a, None), ok(&[]));
+        }
+        assert_eq!(o.admit("b1", b, None), ok(&[]));
+        let all = live(&["a1", "a2", "a3", "b1"]);
+        assert!(!o.refuse_early(a), "a holds the most, so it is not refused");
         assert_eq!(
-            o.admit("new", Some([4; 32]), Some(&some)),
-            Admission::Admitted(vec![]),
-            "sessions rmcp has ended make room"
+            o.admit("a4", a, Some(&all)),
+            ok(&["a1"]),
+            "a full table makes room from a's own oldest"
         );
-        assert!(!o.owned_by("s1", Some([2; 32])));
-        assert!(o.owned_by("new", Some([4; 32])));
+        assert_eq!(o.admit("b2", b, None), ok(&["a2"]), "b still takes from a");
+    }
+
+    #[test]
+    fn a_key_with_one_fewer_than_the_largest_replaces_its_own() {
+        let o = owners(3, 10);
+        let (a, b) = (Some([1; 32]), Some([2; 32]));
+        o.admit("a1", a, None);
+        o.admit("a2", a, None);
+        o.admit("b1", b, None);
+        let all = live(&["a1", "a2", "b1"]);
+        assert!(!o.refuse_early(b));
+        assert_eq!(o.admit("b2", b, Some(&all)), ok(&["b1"]));
+        // A newcomer still takes from whoever holds clearly more, then shares are even.
+        assert_eq!(o.admit("c1", Some([3; 32]), None), ok(&["a1"]));
+        assert!(
+            o.refuse_early(Some([4; 32])),
+            "everyone holds one: a newcomer with none is refused"
+        );
+    }
+
+    #[test]
+    fn a_quiet_session_is_stale_not_gone() {
+        let o = SessionOwners::new(
+            Arc::new(LocalSessionManager::default()),
+            SessionLimits {
+                total: 10,
+                per_owner: 10,
+                idle: Duration::ZERO,
+            },
+        );
+        let who = Some([1; 32]);
+        o.admit("s", who, None);
+        assert_eq!(o.owned_by("s", who), Ownership::Stale);
+        assert_eq!(o.owned_by("s", Some([2; 32])), Ownership::NotOwner);
     }
 
     #[test]

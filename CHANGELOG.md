@@ -45,6 +45,17 @@ copy of this code.
   `X-Content-Type-Options: nosniff`, and HSTS when the server terminates TLS.
 - At most 60 new credential checks start a minute, so fresh addresses cannot turn the server into
   an amplifier against the upstream service.
+- A limit per wider block (IPv4 /24, IPv6 /48) of 25 attempts a minute next to the per-address
+  one, so one allocation cannot spread guesses over thousands of addresses. Attempts still being
+  checked count towards both, never towards the global ceiling. When 10,000 addresses are tracked,
+  a new one is judged by its block, and refused as busy (503) only when blocks cannot be tracked
+  either (from mcp-companies-house).
+- Fair session shares: when a path's session table is full, idle and ended sessions are cleared
+  first, then a newcomer takes a slot from whoever holds the most, so a few hundred credentials
+  cannot lock everyone out. A refusal is decided before rmcp builds the session (from
+  mcp-companies-house).
+- Prompts on `/mcp` that name a service's tools get those names prefixed automatically, as well as
+  through `prompt::tool_prefix` (from mcp-companies-house).
 
 ### Changed, compared with the copies in the two servers
 
@@ -58,6 +69,8 @@ copy of this code.
 - More than one enabled service defining how people sign in is a startup error, as is an owner's
   password of only spaces. A short password or static token is warned about.
 - `X-Forwarded-For` entries with a port are understood.
+- Log caps (`Service::log_caps`) never raise a target above `LOG_LEVEL`, and the audit target stays
+  on at `info` whatever the level.
 - `SignIn`, `CredentialCheck`, `Ceiling`, `TlsMode`, `TokenKind`, `JwtError`, `SealError` and
   `app::Loaded` are `#[non_exhaustive]`, so later versions can add to them.
 

@@ -228,12 +228,19 @@ fn with_page_headers(status: StatusCode, html: String) -> Response {
     res
 }
 
-fn too_many_attempts_page() -> Response {
-    error_page(
-        StatusCode::TOO_MANY_REQUESTS,
-        "Too many attempts from this address: credentials were rejected, or several are being \
-         checked at once. Wait a little and try again.",
-    )
+fn refusal_page(refusal: crate::guards::Refusal) -> Response {
+    match refusal {
+        crate::guards::Refusal::Busy => error_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This server is refusing new addresses while it is under heavy load. Try again \
+             shortly.",
+        ),
+        _ => error_page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts from this address: credentials were rejected, or several are \
+             being checked at once. Wait a little and try again.",
+        ),
+    }
 }
 
 fn error_page(status: StatusCode, message: &str) -> Response {
@@ -422,9 +429,9 @@ pub async fn post_authorize(
     Form(form): Form<LoginForm>,
 ) -> Response {
     let ip = client_ip(peer, &headers, &st.settings.trusted_proxies);
-    if st.limiter.is_blocked(ip) {
+    if let Some(refusal) = st.limiter.refusal(ip) {
         metrics::counter!("oauth_requests_total", "endpoint" => "authorize", "outcome" => "rate_limited").increment(1);
-        return too_many_attempts_page();
+        return refusal_page(refusal);
     }
     let v = match validate(&st, &form.params) {
         Ok(v) => v,
@@ -456,14 +463,16 @@ pub async fn post_authorize(
     }
     let verdict = match st.checks.join(credential::fingerprint(entered)) {
         Ticket::Follow(rx) => CheckRunner::follow(rx).await,
-        Ticket::Lead(lead) => {
-            let Some(reservation) = st.limiter.try_reserve(ip) else {
+        Ticket::Lead(lead) => match st.limiter.try_reserve(ip) {
+            Ok(reservation) => {
+                super::middleware::settled_check(&st, entered, lead, reservation, None).await
+            }
+            Err(refusal) => {
                 st.checks.finish(lead, super::middleware::refused());
                 metrics::counter!("oauth_requests_total", "endpoint" => "authorize", "outcome" => "rate_limited").increment(1);
-                return too_many_attempts_page();
-            };
-            super::middleware::settled_check(&st, entered, lead, reservation, None).await
-        }
+                return refusal_page(refusal);
+            }
+        },
     };
     match verdict {
         CredentialCheck::Valid => {}

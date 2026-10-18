@@ -123,7 +123,7 @@ async fn other_peoples_failures_never_block_a_clean_client() {
         for i in 0..5 {
             let res = app
                 .clone()
-                .oneshot(bearer(&format!("Bearer bad-{ip}-{i}-key"), [10, 0, 1, ip]))
+                .oneshot(bearer(&format!("Bearer bad-{ip}-{i}-key"), [10, ip, 1, 1]))
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -140,13 +140,13 @@ async fn other_peoples_failures_never_block_a_clean_client() {
     for ip in 1..=6u8 {
         for i in 0..5 {
             app.clone()
-                .oneshot(bearer(&format!("Bearer bad-{ip}-{i}-key"), [10, 0, 1, ip]))
+                .oneshot(bearer(&format!("Bearer bad-{ip}-{i}-key"), [10, ip, 1, 1]))
                 .await
                 .unwrap();
         }
     }
     let res = app
-        .oneshot(bearer(&format!("Bearer {GOOD}"), [10, 0, 1, 1]))
+        .oneshot(bearer(&format!("Bearer {GOOD}"), [10, 1, 1, 1]))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);

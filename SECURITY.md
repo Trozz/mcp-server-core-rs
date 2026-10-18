@@ -20,9 +20,10 @@ behalf. It defends against:
 - **Unauthenticated access.** Every service requires an OAuth access token issued for that
   service (RFC 8707 audience binding), the static token, or a credential the verifier accepts.
 - **Guessing.** Failed sign-ins, rejected bearer credentials and wrong static tokens count towards
-  a per-address limit (5 a minute; IPv6 by /64), and a blocked address cannot sign in or use the
-  static token, even correctly, until the limit clears. Failures across all addresses are capped
-  at 30 a minute too. With one shared secret (the owner's password, the static token) reaching
+  a per-address limit (5 a minute; IPv6 by /64) and a per-block limit (25 a minute per IPv4 /24 or
+  IPv6 /48), counted from the moment a check starts, and a blocked address cannot sign in or use
+  the static token, even correctly, until the limit clears. Failures across all addresses are
+  capped at 30 a minute too. With one shared secret (the owner's password, the static token) reaching
   that cap blocks everyone, the owner included, while the attack lasts, so a botnet gains nothing
   from more addresses; clients that already hold an OAuth token keep working. With per-person
   credentials the cap blocks only addresses that have failed themselves, so an attacker cannot
@@ -49,8 +50,9 @@ behalf. It defends against:
   `X-Content-Type-Options: nosniff`, and HSTS when the server terminates TLS itself.
 - **DNS rebinding and cross-site requests.** The MCP endpoints check `Host` and `Origin`.
 - **One person reaching another's session.** MCP sessions are bound to the credential that
-  opened them; a session id is useless with any other credential, and nobody can push other
-  people's sessions out.
+  opened them; a session id is useless with any other credential. When the session table is full,
+  a newcomer takes a slot from whoever holds the most, so nobody is pushed out by someone holding
+  fewer.
 - **Credential exposure.** Upstream credentials are never stored: they are encrypted
   (ChaCha20-Poly1305) inside tokens, never written to logs, and redacted from `Debug` output.
   Logs and the audit log name people by a subject such as `key:` and a short hash, never the
