@@ -72,7 +72,8 @@ pub struct AuditLine {
     /// For an error, its kind: the tool error's `kind: ` prefix, `protocol`, or `read_only`.
     pub error_kind: Option<String>,
     /// `oauth:<client_id>`, `oauth` (a token without a client id), `credential` (a credential
-    /// sent as the bearer token) or `static` (the static token).
+    /// sent as the bearer token) or `static` (the static token, or a request with no caller at
+    /// all, which only happens without the bearer guard).
     pub caller: Option<String>,
     /// Who signed in ([`Caller::subject`]): `owner`, `key:<16 hex digits>`, `static` or a custom
     /// verifier's subject. Never a credential.

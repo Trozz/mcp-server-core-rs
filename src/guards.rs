@@ -63,10 +63,10 @@ pub enum Ceiling {
     /// the total guessing rate stays bounded however many addresses an attacker has.
     BlockEveryone,
     /// Only clients with a rejection of their own in the window are refused, so other people's
-    /// failures never lock out someone who has not failed. When so many addresses are tracked
-    /// that the table is full, an untracked address is judged by its block, and refused as
-    /// [`Refusal::Busy`] when that is untracked too. Right when each person signs in with their
-    /// own credential.
+    /// failures never lock out someone who has not failed. Once the ceiling is reached while so
+    /// many addresses are tracked that the table is full, an untracked address is judged by its
+    /// block, and refused as [`Refusal::Busy`] when that is untracked too. Right when each person
+    /// signs in with their own credential.
     BlockFailing,
 }
 

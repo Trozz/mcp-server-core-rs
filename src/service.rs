@@ -119,8 +119,8 @@ pub trait Service: Send + Sync + 'static {
         &[]
     }
     /// How people sign in to use this service with their own credential, for
-    /// [`SignIn::ServiceCredential`](crate::app::SignIn::ServiceCredential): the server uses the
-    /// first enabled service that returns one.
+    /// [`SignIn::ServiceCredential`](crate::app::SignIn::ServiceCredential). Exactly one enabled
+    /// service may return one; more than one is a startup error.
     fn credential_verifier(&self) -> Option<Arc<dyn CredentialVerifier>> {
         None
     }
@@ -150,8 +150,10 @@ fn origin_with_port(public_url: &str) -> String {
 /// - the request body limit and shutdown wiring;
 /// - the read-only rule and audit log of a [`ToolPolicy`](crate::policy::ToolPolicy) attached to
 ///   the router as an extension (none, no change);
-/// - MCP sessions bound to the credential that opened them, so on a server shared by many people
-///   nobody can use or end someone else's session, and capped per credential and in total.
+/// - MCP sessions bound to the [`Credential`] that opened them, when the request carries one, so on
+///   a server shared by many people nobody can use or end someone else's session; sessions are
+///   capped per credential and in total. Requests without a credential (the owner's password,
+///   the static token) share one owner.
 ///
 /// `factory` runs once per MCP session: only clone `Arc`s in it.
 pub fn mcp_service<S, F>(ctx: &ServiceContext, factory: F) -> axum::Router

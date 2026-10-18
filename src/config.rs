@@ -10,7 +10,7 @@
 //!
 //! | Variable | Default | |
 //! |---|---|---|
-//! | `PUBLIC_URL` | required | External `https://` URL clients use, without a path. `http://` only for `localhost`. |
+//! | `PUBLIC_URL` | required | External `https://` URL clients use, without a path. `http://` only for `localhost`, `127.0.0.1` or `[::1]`. |
 //! | `OAUTH_SIGNING_KEY` | required | At least 32 bytes. Signs every token; changing it signs everyone out. |
 //! | `MCP_AUTH_TOKEN` | none | A fixed bearer token for clients that cannot do OAuth: not when people sign in with their own credential or send it as a bearer token, and not shaped like a JWT (three dot-separated parts). |
 //! | `TRUSTED_PROXIES` | none | Comma-separated proxy IPs whose `X-Forwarded-For` is believed for rate limiting. |
@@ -23,7 +23,7 @@
 //! | `DEBUG` | `false` | Debug logs for your crates and this one. |
 //! | `DEBUG_UNSAFE_LOG_CONTENT` | `false` | Also lets services log content (see [`crate::observability::content_logging_enabled`]). |
 //! | `METRICS_ADDR` | none | Serve Prometheus metrics at this address (feature `prometheus`). |
-//! | `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Export traces over OTLP/HTTP (feature `otel`); the other `OTEL_*` variables apply. |
+//! | `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Export traces over OTLP/HTTP (feature `otel`). Only this variable turns export on; the other `OTEL_*` variables then apply. |
 
 use crate::oauth::OAuthSettings;
 use crate::observability::{LogFormat, ObservabilityConfig};

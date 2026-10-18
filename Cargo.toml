@@ -8,10 +8,11 @@ authors = ["Michael Leer"]
 description = "A batteries-included base for Model Context Protocol (MCP) servers over Streamable HTTP: OAuth 2.1 sign-in, TLS, per-service routing, abuse limits and observability on top of rmcp."
 repository = "https://github.com/Trozz/mcp-server-core-rs"
 documentation = "https://docs.rs/mcp-server-core"
+homepage = "https://trozz.github.io/mcp-server-core-rs/"
 readme = "README.md"
 keywords = ["mcp", "oauth", "rmcp", "server", "streamable-http"]
 categories = ["network-programming", "web-programming::http-server", "authentication"]
-include = ["src/**/*", "examples/**/*", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE"]
+include = ["src/**/*", "examples/**/*", "docs/src/**/*.md", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE"]
 
 [features]
 default = ["otel", "prometheus"]

@@ -90,7 +90,8 @@ const LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
 /// Rewrites a `LOG_LEVEL` filter so it cannot reveal secrets: every target in `caps` (and its
 /// children) is capped at info and the rmcp targets in
 /// [`QUIET_LOG_TARGETS`](crate::service::QUIET_LOG_TARGETS), which log MCP session ids, at warn.
-/// Caps only ever lower a target: never above what `LOG_LEVEL` sets for everything. Every target
+/// A capped target is set to info, or to the level `LOG_LEVEL` sets for everything when that is
+/// lower, replacing any directive `LOG_LEVEL` gave the target itself. Every target
 /// in `always_on` is set to info whatever `LOG_LEVEL` says, which is how the audit log stays on.
 /// Span-scoped directives (containing `[`) are dropped, as they could re-enable a capped target.
 ///

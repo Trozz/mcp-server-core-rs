@@ -5,6 +5,21 @@ All notable changes to this crate are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (before 1.0, a minor version may change
 the API).
 
+## [Unreleased]
+
+### Added
+
+- A documentation site, <https://trozz.github.io/mcp-server-core-rs/>, built with mdBook from
+  `docs/` and published from `main`. Its Rust examples are compiled as doctests.
+
+### Fixed
+
+- The README quick start and the examples import `mcp_server_core::rmcp`. rmcp's macros name the
+  crate `rmcp`, so a project that copied them without depending on rmcp directly did not compile.
+- Doc comments, the README and SECURITY.md now match the code where they had drifted.
+- The CI `msrv` job checks on the minimum supported Rust version; `rust-toolchain.toml` had made it
+  run on the pinned toolchain instead.
+
 ## [0.1.0] - 2026-10-18
 
 The first release, extracted from the servers behind
@@ -25,7 +40,8 @@ copy of this code.
 - Per-person credentials sealed into tokens (ChaCha20-Poly1305 under a key derived from
   `OAUTH_SIGNING_KEY`), or sent directly as bearer tokens with cached verdicts.
 - Abuse limits: per-address (IPv6 by /64) and global sign-in limits, shared and capped credential
-  checks, MCP sessions bound to the credential that opened them and capped per credential.
+  checks, MCP sessions bound to the person's credential that opened them and capped per
+  credential.
 - A read-only rule and write audit log for every service, from tools' `read_only_hint`.
 - TLS from files with hot reload, self-signed certificates or plain HTTP; graceful shutdown;
   JSON logs; Prometheus metrics (feature `prometheus`); OpenTelemetry traces (feature `otel`).
@@ -49,9 +65,9 @@ copy of this code.
   and HSTS when the server serves certificate files.
 - A limit per wider block (IPv4 /24, IPv6 /48) of 25 attempts a minute next to the per-address
   one, so one allocation cannot spread guesses over thousands of addresses. Attempts still being
-  checked count towards both, never towards the global ceiling. When 10,000 addresses are tracked,
-  a new one is judged by its block, and refused as busy (503) only when blocks cannot be tracked
-  either (from mcp-companies-house).
+  checked count towards both, never towards the global ceiling. Once the global ceiling is reached
+  while 10,000 addresses are tracked, a new one is judged by its block, and refused as busy (503)
+  only when blocks cannot be tracked either (from mcp-companies-house).
 - Fair session shares: when a path's session table is full, idle and ended sessions are cleared
   first, then a newcomer takes a slot from whoever holds the most, so a few hundred credentials
   cannot lock everyone out. A refusal is decided before rmcp builds the session (from
@@ -66,7 +82,7 @@ copy of this code.
 - On an owner's-password server without a static token, bearer tokens that are not this server's
   are refused without counting towards the sign-in limits, so they cannot lock the owner out. A
   static token is refused at startup next to a verifier that takes bearer credentials, or when
-  shaped like a JWT, reported with every other configuration error.
+  shaped like a JWT, reported with the other configuration errors once the core settings load.
 - A credential that has the shape of a JWT but was not issued here is checked as a credential;
   this server's own tokens, even expired, are never sent upstream.
 - More than one enabled service defining how people sign in is a startup error, as is an owner's
@@ -76,8 +92,9 @@ copy of this code.
   share limits with the IPv4 address.
 - Log caps (`Service::log_caps`) never raise a target above `LOG_LEVEL`, and the audit target stays
   on at `info` whatever the level.
-- `SignIn`, `CredentialCheck`, `Ceiling`, `TlsMode`, `TokenKind`, `JwtError`, `SealError` and
-  `app::Loaded` are `#[non_exhaustive]`, so later versions can add to them.
+- `SignIn`, `CredentialCheck`, `Ceiling`, `Refusal`, `TlsMode`, `TokenKind`, `JwtError`,
+  `SealError`, `Caller`, `Via` and `app::Loaded` are `#[non_exhaustive]`, so later versions can add
+  to them.
 
 - Wrong static tokens count towards the sign-in limits, and a blocked address cannot use the
   static token until the limit clears, so `MCP_AUTH_TOKEN` cannot be guessed. This server's own

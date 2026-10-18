@@ -121,7 +121,8 @@ impl Safety {
 pub struct Loaded {
     /// The core settings.
     pub core: CoreConfig,
-    /// The selected services, in registration order.
+    /// The selected services, in registration order or in the order `<PREFIX>_SERVICES` names
+    /// them.
     pub services: Vec<Arc<dyn Service>>,
     /// Read-only services and the audit log.
     pub safety: Safety,
@@ -191,7 +192,8 @@ impl Server {
     }
 
     /// Registers a service, mounted at `/<name>`. Services are mounted, and their tools listed on
-    /// `/mcp`, in registration order.
+    /// `/mcp`, in registration order, or in the order `<PREFIX>_SERVICES` names them when it is
+    /// set.
     ///
     /// # Panics
     ///
@@ -228,8 +230,10 @@ impl Server {
         self
     }
 
-    /// Wraps the whole application in your own layers, outermost, for example a request rate
-    /// limiter or extra routes:
+    /// Wraps the whole application in your own layers, for example a request rate limiter or extra
+    /// routes. They sit outside every built-in layer except the security headers. Routes added
+    /// here, like `/favicon.ico`, are outside the body limit, the request metrics and the request
+    /// span:
     ///
     /// ```
     /// # use mcp_server_core::app::Server;
@@ -934,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn service_credentials_come_from_the_first_service_that_defines_them() {
+    fn service_credentials_come_from_the_one_service_that_defines_them() {
         let s = Server::new("mcp-test", "1")
             .service("alpha", alpha)
             .service("keyed", keyed)

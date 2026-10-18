@@ -89,8 +89,14 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --lib --all-features --locked
-      - run: cargo check --lib --no-default-features --locked
+      # rust-toolchain.toml pins a newer toolchain; RUSTUP_TOOLCHAIN overrides it.
+      - name: check on the minimum supported Rust version
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: |
+          cargo --version
+          cargo check --lib --all-features --locked
+          cargo check --lib --no-default-features --locked
 
   docs:
     name: docs
@@ -105,6 +111,19 @@ jobs:
       - run: cargo doc --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings
+
+  book:
+    name: book
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          bash scripts/install-docs-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: bash scripts/build-docs.sh
 
   cargo-deny:
     name: cargo-deny

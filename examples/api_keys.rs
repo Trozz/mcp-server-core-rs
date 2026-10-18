@@ -17,6 +17,7 @@ use mcp_server_core::app::{Server, SignIn};
 use mcp_server_core::axum::http::request::Parts;
 use mcp_server_core::combined::DynHandler;
 use mcp_server_core::credential::{CheckFuture, Credential, CredentialCheck, CredentialVerifier};
+use mcp_server_core::rmcp; // rmcp's macros need `rmcp` in scope
 use mcp_server_core::rmcp::handler::server::router::tool::ToolRouter;
 use mcp_server_core::rmcp::handler::server::tool::Extension;
 use mcp_server_core::rmcp::model::{
