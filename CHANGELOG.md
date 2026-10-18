@@ -30,8 +30,10 @@ copy of this code.
 - TLS from files with hot reload, self-signed certificates or plain HTTP; graceful shutdown;
   JSON logs; Prometheus metrics (feature `prometheus`); OpenTelemetry traces (feature `otel`).
 - Configuration from environment variables with `_FILE` variants and every error reported at once.
-- `Service::router` now has a default that serves `Service::handler`, so a tool-only service
-  implements just `name` and `handler`.
+- `Service::router` now has a default that serves `Service::handler`, so a service implements
+  just `name` and `handler`.
+- MCP prompts: each service's prompts are offered on `/mcp` as `<service>_<prompt>`, and
+  `prompt::tool_prefix` lets a prompt name tools as the endpoint calls them (from mcp-icloud).
 
 ### Changed, compared with the copies in the two servers
 

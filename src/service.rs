@@ -98,14 +98,14 @@ pub trait Service: Send + Sync + 'static {
     /// `mcp` (the combined endpoint) and never containing `_` (the combined endpoint's prefix
     /// separator).
     fn name(&self) -> &'static str;
-    /// This service's MCP handler. It serves the service's tools on the combined `/mcp` endpoint
-    /// and, through the default [`router`](Self::router), at `/<name>`. Called once per MCP
+    /// This service's MCP handler. It serves the service's tools and prompts on the combined
+    /// `/mcp` endpoint and, through the default [`router`](Self::router), at `/<name>`. Called once per MCP
     /// session: keep it cheap, cloning `Arc`s.
     fn handler(&self) -> DynHandler;
     /// The Streamable HTTP service mounted at `/<name>`. The default serves
-    /// [`handler`](Self::handler), which carries tools only; override it with [`mcp_service`] and
-    /// your concrete handler to serve prompts or resources too, or to do work when the service is
-    /// mounted (logging its settings, warming a cache).
+    /// [`handler`](Self::handler), which carries tools and prompts; override it with
+    /// [`mcp_service`] and your concrete handler to serve resources too, or to do work when the
+    /// service is mounted (logging its settings, warming a cache).
     fn router(self: Arc<Self>, ctx: &ServiceContext) -> axum::Router {
         mcp_service(ctx, move || Ok(self.handler()))
     }
