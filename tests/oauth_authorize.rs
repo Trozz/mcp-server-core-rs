@@ -484,3 +484,39 @@ async fn sixth_owner_attempt_is_rate_limited_even_with_the_right_password() {
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(res.headers()["retry-after"], "30");
 }
+
+#[tokio::test]
+async fn failures_spread_over_many_addresses_lock_out_even_the_owner_for_a_while() {
+    let st = owner_state(None, &["mail"]);
+    let app = app(st.clone());
+    let html = login_page(&app, &client_id(&st)).await;
+    for i in 0..mcp_server_core::guards::GLOBAL_MAX_FAILURES {
+        let peer = [10, 9, (i / 256) as u8, (i % 256) as u8];
+        let pairs = form_fields(&html, "nope");
+        let pairs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        assert_eq!(
+            send(&app, form_post_from("/authorize", &pairs, peer, None))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let fields = form_fields(&html, PASSWORD);
+    let pairs: Vec<(&str, &str)> = fields
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let res = send(
+        &app,
+        form_post_from("/authorize", &pairs, [192, 0, 2, 1], None),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "one shared password: the total guessing rate stays bounded"
+    );
+}

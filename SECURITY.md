@@ -20,8 +20,13 @@ behalf. It defends against:
 - **Unauthenticated access.** Every service requires an OAuth access token issued for that
   service (RFC 8707 audience binding), the static token, or a credential the verifier accepts.
 - **Guessing.** Failed sign-ins, rejected bearer credentials and wrong static tokens count towards
-  a per-address limit (5 a minute; IPv6 by /64) and a global ceiling; a blocked address cannot
-  sign in, even correctly, until the limit clears. Secrets are compared in constant time.
+  a per-address limit (5 a minute; IPv6 by /64); a blocked address cannot sign in, even
+  correctly, until the limit clears. Failures across all addresses are capped at 30 a minute too.
+  With one shared secret (the owner's password, the static token) reaching that cap blocks
+  everyone, the owner included, for the rest of the minute, so a botnet gains nothing from more
+  addresses (clients that already hold an OAuth access token keep working; the static token and
+  the sign-in page wait). With per-person credentials it blocks only addresses that have failed themselves, so
+  an attacker cannot lock other people out. Secrets are compared in constant time.
 - **Abusing the upstream service through the server.** Credentials of an implausible shape are
   refused locally; upstream checks are capped, timed out and shared per credential; verdicts on
   bearer credentials are cached under the credential's SHA-256.

@@ -28,7 +28,7 @@ pub use middleware::require_bearer;
 pub use register::validate_redirect_uri;
 
 use crate::credential::{CheckCache, CheckRunner, CredentialVerifier, Sealer};
-use crate::guards::{LoginLimiter, ReplayGuard};
+use crate::guards::{Ceiling, LoginLimiter, ReplayGuard};
 use crate::jwt::Jwt;
 use axum::Router;
 use axum::routing::{get, post};
@@ -73,7 +73,9 @@ pub const MAX_RUNNING_CHECKS: usize = 16;
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest a check waits for a free slot when [`MAX_RUNNING_CHECKS`] are already running.
 pub const CHECK_SLOT_WAIT: Duration = Duration::from_secs(5);
-/// Failed sign-in attempts one address may make per [`LOGIN_WINDOW`].
+/// Failed sign-in attempts one address may make per [`LOGIN_WINDOW`]. Failures across all
+/// addresses are capped too (see [`crate::guards::Ceiling`]): with a credential that is not
+/// carried, such as the owner's password, reaching that cap blocks everyone for the window.
 pub const LOGIN_ATTEMPTS: usize = 5;
 /// The window [`LOGIN_ATTEMPTS`] counts over.
 pub const LOGIN_WINDOW: Duration = Duration::from_secs(60);
@@ -119,10 +121,17 @@ impl AuthState {
             settings.public_url.clone(),
         );
         let sealer = Sealer::new(key);
+        // One shared secret (the owner's password, the static token) is worth a lockout of
+        // everyone during a distributed attack; with per-person credentials it is not.
+        let ceiling = if verifier.carried() {
+            Ceiling::BlockFailing
+        } else {
+            Ceiling::BlockEveryone
+        };
         Arc::new(Self {
             settings,
             jwt,
-            limiter: LoginLimiter::new(LOGIN_ATTEMPTS, LOGIN_WINDOW),
+            limiter: LoginLimiter::new(LOGIN_ATTEMPTS, LOGIN_WINDOW, ceiling),
             replay: ReplayGuard::new(),
             verifier,
             sealer,

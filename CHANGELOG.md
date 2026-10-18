@@ -35,9 +35,12 @@ copy of this code.
 
 ### Changed, compared with the copies in the two servers
 
-- Wrong static tokens count towards the per-address sign-in limit, and a blocked address cannot
-  use the static token until the limit clears, so `MCP_AUTH_TOKEN` cannot be guessed. Expired or
-  foreign OAuth tokens never count.
+- Wrong static tokens count towards the sign-in limits, and a blocked address cannot use the
+  static token until the limit clears, so `MCP_AUTH_TOKEN` cannot be guessed. Expired or foreign
+  OAuth tokens never count.
+- The global sign-in ceiling depends on how people sign in: with the owner's password it blocks
+  everyone (as mcp-icloud did); with per-person credentials only addresses that failed themselves
+  (as mcp-companies-house did). See `guards::Ceiling`.
 - Successful sign-in answers `303 See Other` (RFC 9700), not `302 Found`.
 - The owner's password is compared exactly as typed; credentials for upstream services are trimmed.
 - Random token ids no longer need the `uuid` crate.
