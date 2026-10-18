@@ -12,6 +12,14 @@ the API).
 - A documentation site, <https://trozz.github.io/mcp-server-core-rs/>, built with mdBook from
   `docs/` and published from `main`. Its Rust examples are compiled as doctests.
 
+### Fixed
+
+- The README quick start and the examples import `mcp_server_core::rmcp`. rmcp's macros name the
+  crate `rmcp`, so a project that copied them without depending on rmcp directly did not compile.
+- Doc comments, the README and SECURITY.md now match the code where they had drifted.
+- The CI `msrv` job checks on the minimum supported Rust version; `rust-toolchain.toml` had made it
+  run on the pinned toolchain instead.
+
 ## [0.1.0] - 2026-10-18
 
 The first release, extracted from the servers behind
