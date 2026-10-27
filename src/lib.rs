@@ -99,6 +99,7 @@ pub mod prompt;
 pub mod server;
 pub mod service;
 pub mod tls;
+pub mod upstream;
 
 pub use axum;
 pub use rmcp;

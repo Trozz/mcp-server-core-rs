@@ -197,10 +197,12 @@ pub struct LoginForm {
     #[serde(flatten)]
     pub params: AuthorizeParams,
     pub csrf: String,
+    /// What was typed; absent when people sign in through an upstream provider.
+    #[serde(default)]
     pub credential: String,
 }
 
-fn escape(s: &str) -> String {
+pub(super) fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -208,7 +210,7 @@ fn escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn with_page_headers(status: StatusCode, html: String) -> Response {
+pub(super) fn with_page_headers(status: StatusCode, html: String) -> Response {
     let mut res = (status, Html(html)).into_response();
     let h = res.headers_mut();
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
@@ -232,7 +234,7 @@ fn with_page_headers(status: StatusCode, html: String) -> Response {
     res
 }
 
-fn refusal_page(refusal: crate::guards::Refusal) -> Response {
+pub(super) fn refusal_page(refusal: crate::guards::Refusal) -> Response {
     match refusal {
         crate::guards::Refusal::Busy => error_page(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -247,7 +249,7 @@ fn refusal_page(refusal: crate::guards::Refusal) -> Response {
     }
 }
 
-fn error_page(status: StatusCode, message: &str) -> Response {
+pub(super) fn error_page(status: StatusCode, message: &str) -> Response {
     with_page_headers(
         status,
         format!(
@@ -320,6 +322,22 @@ fn login_page(
         )
     };
     let verifier = st.verifier.as_ref();
+    if let Some(upstream) = verifier.upstream() {
+        let provider = escape(upstream.provider());
+        let help = match verifier.help().trim() {
+            "" => String::new(),
+            h => format!("<p><small>{}</small></p>", escape(h)),
+        };
+        let html = format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">\
+<title>Authorize</title><style>body{{font-family:system-ui;max-width:24rem;margin:4rem auto;padding:0 1rem}}button{{margin-top:1rem;padding:.5rem 1rem}}small{{color:#555}}</style></head>\
+<body><h1>Authorize access</h1><p>An MCP client is requesting access to {target}.</p>{client_html}{destination}\
+<p>Only continue if you started connecting this client. You will sign in at <strong>{provider}</strong> and approve access there; \
+what {provider} grants is kept only in encrypted form inside this connection's tokens, and this server does not store it.</p>{error_html}\
+<form method=\"post\" action=\"/authorize\">{hidden}{help}<button type=\"submit\">Continue to {provider}</button></form></body></html>"
+        );
+        return with_page_headers(status, html);
+    }
     let label = escape(verifier.label());
     let field = escape(&capitalised(verifier.label()));
     let help = match verifier.help().trim() {
@@ -362,7 +380,7 @@ fn capitalised(s: &str) -> String {
 
 /// An error sent back to the client's redirect URI, with `iss` (RFC 9207). `after_post` answers
 /// 303 so no user agent re-sends a form body; otherwise 302.
-fn redirect_error(
+pub(super) fn redirect_error(
     issuer: &str,
     redirect_uri: &str,
     state: Option<&str>,
@@ -453,6 +471,9 @@ pub async fn post_authorize(
             "The login form expired or was modified. Start the connection again.",
         );
     }
+    if let Some(upstream) = st.verifier.upstream() {
+        return super::callback::start(&st, &v, upstream);
+    }
     let label = st.verifier.label();
     let entered = st.verifier.prepare(&form.credential);
     // Input that could not be a credential is refused here without asking upstream, so it costs
@@ -508,6 +529,19 @@ pub async fn post_authorize(
     } else {
         None
     };
+    let subject = st.subject_of(entered);
+    grant_code(&st, &v, sealed, subject)
+}
+
+/// Issues an authorization code for the validated request `v` (with the person's sealed
+/// credential, if carried, and their subject) and sends the browser back to the client. Answers
+/// 303, so no user agent re-sends a form body to the client's redirect URI (RFC 9700 4.12).
+pub(super) fn grant_code(
+    st: &AuthState,
+    v: &ValidRequest,
+    sealed: Option<String>,
+    subject: String,
+) -> Response {
     let payload = Payload {
         client_id: Some(v.client_id.clone()),
         redirect_uri: Some(v.redirect_uri.clone()),
@@ -519,7 +553,6 @@ pub async fn post_authorize(
         auth_time: Some(jsonwebtoken::get_current_timestamp()),
         ..Default::default()
     };
-    let subject = st.subject_of(entered);
     let audience = st.settings.public_url.clone();
     let Ok(code) = st.jwt.issue_as(
         TokenKind::Code,

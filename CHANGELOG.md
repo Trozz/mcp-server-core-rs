@@ -9,6 +9,14 @@ the API).
 
 ### Added
 
+- Sign-in through the upstream service's own OAuth (`upstream` module). A verifier whose new
+  `CredentialVerifier::upstream` method returns an `UpstreamSignIn`, such as an
+  `UpstreamVerifier`, turns the sign-in page into a consent page that continues to the provider;
+  the provider sends people back to `PUBLIC_URL/callback`, the code is exchanged and the
+  credential it grants is sealed into their tokens. The pending request is kept in an encrypted,
+  browser-bound cookie, so nothing is stored. `AuthState::callback_url` gives the redirect URI to
+  register with the provider. A service cannot be named `callback` on such a server.
+
 - A documentation site, <https://trozz.github.io/mcp-server-core-rs/>, built with mdBook from
   `docs/` and published from `main`. Its Rust examples are compiled as doctests.
 

@@ -9,6 +9,7 @@
 //! | `POST /register` | Dynamic client registration (RFC 7591), public clients only |
 //! | `GET, POST /authorize` | The sign-in page; authorization code with PKCE S256 only |
 //! | `POST /token` | `authorization_code` and `refresh_token` grants |
+//! | `GET /callback` | Where an upstream provider sends people back, when they sign in through one ([`crate::upstream`]) |
 //!
 //! Every service `<name>` is its own protected resource, `PUBLIC_URL/<name>`, and access tokens
 //! are bound to it (RFC 8707): a token for one service is refused by every other.
@@ -18,6 +19,7 @@
 //! memory until they expire. Rotating the key signs everyone out.
 
 mod authorize;
+mod callback;
 mod metadata;
 mod middleware;
 mod register;
@@ -97,6 +99,10 @@ pub struct AuthState {
     pub(crate) bearer_checks: CheckCache,
     /// Runs credential checks: shared per credential, capped and timed out.
     pub(crate) checks: CheckRunner,
+    /// Seals sign-ins waiting for an upstream provider into the browser's cookie.
+    pub(crate) pending: Sealer,
+    /// Upstream code exchanges allowed to run at once.
+    pub(crate) exchanges: Arc<tokio::sync::Semaphore>,
     services: Vec<String>,
     sign_in_version: String,
     /// Keys the default subject of carried credentials, so a subject cannot be used to guess
@@ -180,6 +186,11 @@ impl AuthState {
             settings.public_url.clone(),
         );
         let sealer = Sealer::new(key);
+        let pending = Sealer::for_purpose(
+            key,
+            b"upstream pending v1",
+            b"mcp-server-core upstream pending v1",
+        );
         let sign_in_version = sign_in_version(key, verifier.as_ref());
         let subject_key = {
             let mut ctx =
@@ -207,6 +218,8 @@ impl AuthState {
                 BEARER_CACHE_ENTRIES,
             ),
             checks: CheckRunner::new(MAX_RUNNING_CHECKS, CHECK_TIMEOUT, CHECK_SLOT_WAIT),
+            pending,
+            exchanges: Arc::new(tokio::sync::Semaphore::new(MAX_RUNNING_CHECKS)),
             services: services.iter().map(|s| s.to_string()).collect(),
             sign_in_version,
             subject_key,
@@ -289,6 +302,16 @@ impl AuthState {
         self.services.iter().any(|s| s == service)
     }
 
+    /// Where an upstream provider sends people back: `PUBLIC_URL/callback`. Register it with the
+    /// provider as a redirect URI.
+    pub fn callback_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.settings.public_url,
+            crate::upstream::CALLBACK_PATH
+        )
+    }
+
     /// The resource URL of `service`: `PUBLIC_URL/<service>`.
     pub fn resource(&self, service: &str) -> String {
         format!("{}/{service}", self.settings.public_url)
@@ -314,7 +337,12 @@ impl AuthState {
 /// The authorization server's routes: metadata, registration, sign-in and token endpoints.
 /// [`crate::server::build_app`] merges them for you.
 pub fn oauth_router(state: Arc<AuthState>) -> Router {
-    Router::new()
+    let router = if state.verifier.upstream().is_some() {
+        Router::new().route(crate::upstream::CALLBACK_PATH, get(callback::get_callback))
+    } else {
+        Router::new()
+    };
+    router
         .route(
             "/.well-known/oauth-protected-resource/{service}",
             get(metadata::protected_resource),

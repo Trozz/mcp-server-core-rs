@@ -53,6 +53,14 @@ behalf. It defends against:
 - **Authorization code interception and CSRF.** PKCE S256 is required; codes are one-time and
   short-lived; the sign-in form is bound to its exact request; redirect URIs must be registered,
   be `https` or loopback, and are capped in number and length; responses carry `iss` (RFC 9207).
+- **Signing in through an upstream provider.** Every client is shown on a consent page before
+  the browser leaves for the provider, because all clients reach the provider under the server's
+  one OAuth client id. The pending request travels in a cookie encrypted under its own key derived
+  from `OAUTH_SIGNING_KEY`, bound to a random 256-bit `state`, `HttpOnly`, `SameSite=Lax`, limited
+  to `/callback` and expiring after 10 minutes, so a provider's code is only accepted from the
+  browser that started that sign-in. The client and redirect URI are checked again on return.
+  Code exchanges are timed out and capped at 16 at once, and refused codes count towards the
+  sign-in limits. The provider's credential is sealed like any other.
 - **Clickjacking and leaks from the sign-in page.** It sends `X-Frame-Options: DENY`, a strict
   CSP, `no-store` and `no-referrer`, escapes every value, shows where the person will be sent and
   marks the client's name (capped at 200 characters) as unverified. Every response from

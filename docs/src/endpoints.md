@@ -14,6 +14,7 @@ This page lists every HTTP route a server built with `app::Server` serves: who m
 | `GET` | `/authorize` | none | The sign-in page. |
 | `POST` | `/authorize` | the credential, in the form | Signs the person in and redirects to the client with a code. |
 | `POST` | `/token` | a code and its PKCE verifier, or a refresh token | Issues access and refresh tokens. |
+| `GET` | `/callback` | the pending sign-in's cookie and `state` | Only when people [sign in through an upstream provider](sign-in.md#signing-in-through-an-upstream-provider): where the provider sends them back. Redirects to the client with a code. |
 | `POST`, `GET`, `DELETE` | `/<service>` | bearer token | One service's MCP endpoint (Streamable HTTP). |
 | `POST`, `GET`, `DELETE` | `/mcp` | bearer token | Every service together, while `<PREFIX>_COMBINED` is `true` and at least one service is enabled. See [Several services and /mcp](combined.md). |
 
@@ -152,7 +153,8 @@ How each step works, and every error message, is on [OAuth and tokens](oauth.md)
 |---|---|
 | `POST /register` | `201` with the client's registration as JSON. `400` with `invalid_client_metadata` or `invalid_redirect_uri` for input outside the [registration caps](oauth.md#dynamic-client-registration). |
 | `GET /authorize` | `200` with the sign-in page. `400` with an error page for an unknown client or redirect URI. `302` to the redirect URI with `error` for other invalid requests. |
-| `POST /authorize` | `303` to the redirect URI with `code`, `state` and `iss` on success, or with `error` for an invalid request. `400` with an error page for an unknown client or redirect URI, or when the form expired or was altered. `401` with the page again for input that is not plausible or a rejected credential. `429` or `503` when the sign-in limits refuse the address, and `503` when the credential could not be checked. See [The sign-in page](oauth.md#the-sign-in-page). |
+| `POST /authorize` | With an upstream provider, `303` to the provider with a pending sign-in cookie. Otherwise `303` to the redirect URI with `code`, `state` and `iss` on success, or with `error` for an invalid request. `400` with an error page for an unknown client or redirect URI, or when the form expired or was altered. `401` with the page again for input that is not plausible or a rejected credential. `429` or `503` when the sign-in limits refuse the address, and `503` when the credential could not be checked. See [The sign-in page](oauth.md#the-sign-in-page). |
+| `GET /callback` | `303` to the redirect URI with `code`, `state` and `iss`, or with `error=access_denied` when the person declined at the provider. `400` with an error page when the sign-in expired or was started in another browser, `401` when the provider refused the code, `503` when it could not be reached, `429` when the sign-in limits refuse the address. |
 | `POST /token` | `200` with tokens as JSON. `400` with an OAuth error as JSON. `413` for a body over the limit. See [The token endpoint](oauth.md#the-token-endpoint). |
 
 `/register` reads JSON; `/token` and `POST /authorize` read forms (`application/x-www-form-urlencoded`).
