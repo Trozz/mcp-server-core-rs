@@ -268,7 +268,7 @@ Without them the crate pulls in fewer dependencies. Metrics are still recorded t
 
 ```toml
 [dependencies]
-mcp-server-core = { version = "0.1", default-features = false, features = ["prometheus"] }
+mcp-server-core = { version = "0.2", default-features = false, features = ["prometheus"] }
 ```
 
 ## What is never logged

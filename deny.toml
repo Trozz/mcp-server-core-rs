@@ -4,6 +4,7 @@ all-features = true
 [advisories]
 yanked = "deny"
 ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 is pulled in by jsonwebtoken rust_crypto (p256/p384) but only HS256 (HMAC) is used (src/jwt.rs); no elliptic-curve arithmetic on secrets occurs, and elliptic-curve 0.13 cannot take the fixed crypto-bigint 0.7" },
     { id = "RUSTSEC-2023-0071", reason = "rsa is pulled in by jsonwebtoken rust_crypto but only HS256 (HMAC) is used (src/jwt.rs); no RSA signing or decryption occurs, and no patched rsa release exists" },
 ]
 

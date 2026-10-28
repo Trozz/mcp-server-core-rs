@@ -7,6 +7,11 @@ the API).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
+Nothing changes for servers that already run on 0.1: their sign-in, tokens and configuration work
+as before, and nobody is signed out by upgrading.
+
 ### Added
 
 - Sign-in through the upstream service's own OAuth (`upstream` module). A verifier whose new
@@ -19,6 +24,12 @@ the API).
 
 - A documentation site, <https://trozz.github.io/mcp-server-core-rs/>, built with mdBook from
   `docs/` and published from `main`. Its Rust examples are compiled as doctests.
+
+### Security
+
+- The lockfile takes rustls-webpki 0.103.16 and webpki-root-certs 1.0.11, which stop trusting
+  distrusted certificate intermediates (RUSTSEC-2026-0382, RUSTSEC-2026-0383). Run
+  `cargo update -p rustls-webpki -p webpki-root-certs` in your own servers too.
 
 ### Fixed
 
@@ -119,4 +130,5 @@ copy of this code.
 - Client ID Metadata Documents, which the MCP authorization spec now prefers to dynamic client
   registration.
 
+[0.2.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.1.0
