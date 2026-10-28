@@ -15,10 +15,10 @@ From 1.0, only a major version may break the API. Until then, depend on a minor 
 
 ```toml
 [dependencies]
-mcp-server-core = "0.1"
+mcp-server-core = "0.2"
 ```
 
-Cargo reads `"0.1"` as `>=0.1.0, <0.2.0`: you get patch releases with `cargo update`, and never a new minor version without changing the requirement.
+Cargo reads `"0.2"` as `>=0.2.0, <0.3.0`: you get patch releases with `cargo update`, and never a new minor version without changing the requirement.
 
 An upgrade can affect a running server as well as your code. The 0.1.0 entry, for example, says that tokens issued by the servers' earlier copies of this code lack the new claims, so everyone signs in once more after upgrading. Read the **Changed** section before upgrading a deployed server.
 

@@ -7,6 +7,11 @@ the API).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
+Nothing changes for servers that already run on 0.1: their sign-in, tokens and configuration work
+as before, and nobody is signed out by upgrading.
+
 ### Added
 
 - Sign-in through the upstream service's own OAuth (`upstream` module). A verifier whose new
@@ -119,4 +124,5 @@ copy of this code.
 - Client ID Metadata Documents, which the MCP authorization spec now prefers to dynamic client
   registration.
 
+[0.2.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.1.0
