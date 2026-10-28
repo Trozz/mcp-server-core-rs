@@ -74,6 +74,11 @@ pub enum SignIn {
     /// service's tools would receive a credential meant for another upstream). Tools find it as a
     /// [`Credential`](crate::credential::Credential) in the request extensions, so one server can
     /// serve many people. Clients may also send the credential itself as their bearer token.
+    ///
+    /// A verifier with an [`upstream`](CredentialVerifier::upstream) provider, such as an
+    /// [`UpstreamVerifier`](crate::upstream::UpstreamVerifier), has people sign in at the
+    /// provider instead, and the credential it grants is carried the same way; see
+    /// [`crate::upstream`].
     ServiceCredential,
     /// A verifier built from the environment by your function, which records any problems in
     /// `env.errors`.
@@ -388,6 +393,16 @@ impl Server {
                     several.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
                 )),
             }
+        }
+        if verifier.as_ref().is_some_and(|v| v.upstream().is_some())
+            && services
+                .iter()
+                .any(|s| crate::upstream::CALLBACK_PATH.strip_prefix('/') == Some(s.name()))
+        {
+            env.errors.push(format!(
+                "a service cannot be named {} when people sign in through an upstream provider: the provider sends them back there",
+                crate::upstream::CALLBACK_PATH.trim_start_matches('/')
+            ));
         }
         let mut warnings = Vec::new();
         if let Some(token) = core.as_ref().and_then(|c| c.oauth.static_token.as_ref()) {
@@ -1061,6 +1076,52 @@ mod tests {
         let mut e = env(&CORE[..2]);
         assert!(s.load(&mut e).is_none());
         assert_eq!(e.errors, vec!["CUSTOM_PASSWORD is required".to_string()]);
+    }
+
+    #[test]
+    fn callback_is_reserved_when_people_sign_in_upstream() {
+        use crate::upstream::{Exchange, ExchangeFuture, UpstreamSignIn, UpstreamVerifier};
+        struct Provider;
+        impl UpstreamSignIn for Provider {
+            fn provider(&self) -> &str {
+                "Provider"
+            }
+            fn authorize_url(&self, _: &str, _: &str) -> String {
+                "https://provider.example.com/authorize".into()
+            }
+            fn exchange<'a>(&'a self, _: &'a str, _: &'a str) -> ExchangeFuture<'a> {
+                Box::pin(async { Exchange::Refused("no".into()) })
+            }
+        }
+        fn upstream(_: &mut ServiceEnv) -> Option<Arc<dyn CredentialVerifier>> {
+            Some(Arc::new(UpstreamVerifier::new(
+                "Provider account",
+                Provider,
+            )))
+        }
+        fn callback(_: &mut ServiceEnv) -> Option<Arc<dyn Service>> {
+            Some(Arc::new(Named("callback")))
+        }
+        let s = Server::new("mcp-test", "1")
+            .service("callback", callback)
+            .sign_in(SignIn::Custom(upstream));
+        let mut e = env(&CORE[..2]);
+        assert!(s.load(&mut e).is_none());
+        assert!(
+            e.errors[0].contains("cannot be named callback"),
+            "{:?}",
+            e.errors
+        );
+        let s = Server::new("mcp-test", "1")
+            .service("alpha", alpha)
+            .sign_in(SignIn::Custom(upstream));
+        let mut e = env(&CORE[..2]);
+        let loaded = s.load(&mut e).expect("loads");
+        assert!(loaded.verifier.upstream().is_some());
+        // With a password, callback is an ordinary name.
+        let s = Server::new("mcp-test", "1").service("callback", callback);
+        let mut e = env(CORE);
+        assert!(s.load(&mut e).is_some(), "{:?}", e.errors);
     }
 
     #[test]

@@ -178,6 +178,13 @@ pub trait CredentialVerifier: Send + Sync + 'static {
     fn generation(&self) -> &[u8] {
         &[]
     }
+    /// The upstream OAuth provider people sign in through instead of typing a credential, if
+    /// any: the sign-in page then sends them to the provider, and the credential it grants is
+    /// sealed into their tokens. Defaults to `None`. [`UpstreamVerifier`](crate::upstream::UpstreamVerifier)
+    /// builds a verifier around one; see [`crate::upstream`].
+    fn upstream(&self) -> Option<&dyn crate::upstream::UpstreamSignIn> {
+        None
+    }
 }
 
 /// Whether `s` has the shape of a credential: non-empty, at most [`MAX_CREDENTIAL_LEN`] bytes,
@@ -270,6 +277,7 @@ pub enum SealError {
 pub struct Sealer {
     key: LessSafeKey,
     rng: SystemRandom,
+    aad: &'static [u8],
 }
 
 const SEAL_SALT: &[u8] = b"mcp-server-core credential sealing";
@@ -279,13 +287,21 @@ const SEAL_AAD: &[u8] = b"mcp-server-core credential v1";
 impl Sealer {
     /// A sealer whose key is derived from `signing_key`.
     pub fn new(signing_key: &[u8]) -> Self {
+        Self::for_purpose(signing_key, SEAL_INFO, SEAL_AAD)
+    }
+
+    /// A sealer for something other than credentials, under its own key (HKDF `info`) and
+    /// associated data, so what it seals can never be opened as a credential or the reverse.
+    pub(crate) fn for_purpose(signing_key: &[u8], info: &[u8], aad: &'static [u8]) -> Self {
         let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, SEAL_SALT).extract(signing_key);
+        let info = [info];
         let okm = prk
-            .expand(&[SEAL_INFO], &CHACHA20_POLY1305)
+            .expand(&info, &CHACHA20_POLY1305)
             .expect("32 bytes is a valid HKDF-SHA256 output length");
         Sealer {
             key: LessSafeKey::new(UnboundKey::from(okm)),
             rng: SystemRandom::new(),
+            aad,
         }
     }
 
@@ -297,7 +313,7 @@ impl Sealer {
         self.key
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(nonce),
-                Aad::from(SEAL_AAD),
+                Aad::from(self.aad),
                 &mut data,
             )
             .map_err(|_| SealError::Seal)?;
@@ -319,7 +335,7 @@ impl Sealer {
         let mut data = rest.to_vec();
         let plain = self
             .key
-            .open_in_place(nonce, Aad::from(SEAL_AAD), &mut data)
+            .open_in_place(nonce, Aad::from(self.aad), &mut data)
             .map_err(|_| SealError::Open)?;
         let text = std::str::from_utf8(plain).map_err(|_| SealError::Open)?;
         Ok(Credential::new(text))

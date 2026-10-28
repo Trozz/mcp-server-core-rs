@@ -159,6 +159,53 @@ let server = Server::new("mcp-example", "1.0.0").sign_in(SignIn::Custom(sign_in)
 
 Use `Custom` when sign-in needs configuration that is not any one service's, or when you want a password with a different label or variable than the owner's password. A custom verifier whose `carried()` is `false` behaves like the owner's password: nothing about it enters tokens and tools get no `Credential`.
 
+### Signing in through an upstream provider
+
+When the upstream service has OAuth of its own, such as FreeAgent, GitHub or Google, people can sign in there instead of pasting a key. The server acts as the provider's OAuth client: a verifier whose [`upstream`](https://docs.rs/mcp-server-core/latest/mcp_server_core/credential/trait.CredentialVerifier.html#method.upstream) method returns an [`UpstreamSignIn`](https://docs.rs/mcp-server-core/latest/mcp_server_core/upstream/trait.UpstreamSignIn.html) turns the sign-in page into a consent page with a **Continue to** button, and the credential the provider grants, usually its refresh token, is sealed into the person's tokens like any carried credential. [`UpstreamVerifier`](https://docs.rs/mcp-server-core/latest/mcp_server_core/upstream/struct.UpstreamVerifier.html) builds such a verifier around your provider; return it from `Service::credential_verifier` with `SignIn::ServiceCredential`, or from a `SignIn::Custom` function.
+
+```rust
+use mcp_server_core::credential::CredentialVerifier;
+use mcp_server_core::upstream::{Exchange, ExchangeFuture, UpstreamGrant, UpstreamSignIn, UpstreamVerifier};
+use std::sync::Arc;
+
+struct Ledger;
+
+impl UpstreamSignIn for Ledger {
+    fn provider(&self) -> &str {
+        "Ledger"
+    }
+    fn authorize_url(&self, redirect_uri: &str, state: &str) -> String {
+        let mut url = url::Url::parse("https://ledger.example.com/oauth/authorize").unwrap();
+        url.query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", "this-server")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("state", state);
+        url.into()
+    }
+    fn exchange<'a>(&'a self, code: &'a str, redirect_uri: &'a str) -> ExchangeFuture<'a> {
+        Box::pin(async move {
+            // POST code and redirect_uri to the token endpoint; on success:
+            let _ = (code, redirect_uri);
+            Exchange::Granted(UpstreamGrant::new("the refresh token").with_subject("ledger:user:42"))
+        })
+    }
+}
+
+fn verifier() -> Arc<dyn CredentialVerifier> {
+    Arc::new(UpstreamVerifier::new("Ledger account", Ledger).with_generation(b"live".to_vec()))
+}
+# let _ = verifier();
+```
+
+The flow, with nothing stored on the server:
+
+1. `GET /authorize` shows which client is asking and where it will be sent, as the ordinary sign-in page does. Consent is asked here for every client: all of them reach the provider under this server's one OAuth client id, so the provider's own consent screen cannot tell them apart.
+2. The button posts the form, which sets a cookie holding the pending request, encrypted under a key derived from `OAUTH_SIGNING_KEY` and bound to a random `state`, and sends the browser to `authorize_url`. The cookie is `HttpOnly`, `SameSite=Lax`, limited to `/callback`, `Secure` over https, and lasts 10 minutes.
+3. The provider sends the browser back to `PUBLIC_URL/callback`. The server checks `state` against the cookie, calls `exchange` (timed out, at most 16 at once) and sends the browser on to the client with an authorization code carrying the sealed credential. A declined approval reaches the client as `access_denied`.
+
+Register `PUBLIC_URL/callback` with the provider as a redirect URI; for local use, `http://localhost:<port>/callback`. No service may be named `callback` on such a server. An exchange the provider refuses counts as a failed sign-in attempt; one it cannot answer does not. `UpstreamGrant::with_subject` names the person, say by the provider's user id, so their subject stays the same across sign-ins; without it, the subject is derived from the credential. Tools receive the credential as a `Credential` and exchange it for access tokens as they need them; a provider that rotates refresh tokens on every use cannot be used this way, because the sealed credential never changes.
+
 ### Single sign-on and many named users
 
 The modes are deliberately few. For single sign-on, multi-factor authentication or many named users, put an identity-aware gateway such as Cloudflare Access or oauth2-proxy in front of `/authorize`. It is the only page a person's browser opens.
@@ -178,6 +225,7 @@ A [`CredentialVerifier`](https://docs.rs/mcp-server-core/latest/mcp_server_core/
 | `accepts_bearer(&self) -> bool` | `carried()` | Whether a client may send the credential itself as its bearer token instead of signing in with OAuth. |
 | `subject(&self, credential) -> Option<String>` | `None` | Who signed in, as tokens, logs and the audit log name them. `None` lets the server name them (see [Subjects](#subjects)). It must not reveal the credential. |
 | `generation(&self) -> &[u8]` | empty | Bytes that change whenever every earlier sign-in should end, such as a hash of a password or the upstream environment. They go into the sign-in version with the label. |
+| `upstream(&self) -> Option<&dyn UpstreamSignIn>` | `None` | An upstream OAuth provider people sign in through instead of typing a credential. See [Signing in through an upstream provider](#signing-in-through-an-upstream-provider). |
 
 The default `plausible` accepts 1 to 256 bytes ([`credential::MAX_CREDENTIAL_LEN`](https://docs.rs/mcp-server-core/latest/mcp_server_core/credential/constant.MAX_CREDENTIAL_LEN.html)) of visible ASCII without spaces. Narrow it when the upstream service's credentials have a known form, so other tokens are refused without asking upstream:
 

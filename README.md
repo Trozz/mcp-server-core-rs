@@ -20,6 +20,9 @@ and limits) and [docs.rs](https://docs.rs/mcp-server-core) (the API).
 - **Two ways to sign in**: the owner's password, for a personal server; or each person's own key
   for the upstream API your tools call, checked on sign-in, sealed into their tokens and handed to
   your tools, so one deployment serves many people. Or bring your own check.
+- **Or sign in at the upstream service itself**: with an `upstream::UpstreamSignIn`, people
+  approve access at the provider's own OAuth (FreeAgent, GitHub, Google and the like) and the
+  credential it grants is sealed into their tokens, still with nothing stored.
 - **Several services on one server**: each at `/<name>` and its own OAuth resource, and all their
   tools together at `/mcp`.
 - **Hardened**: sign-in limits per address, per network and overall, capped and shared upstream
@@ -186,6 +189,7 @@ rejection keeps counting, while `Valid` and `Unavailable` are given back.
 | `/.well-known/oauth-protected-resource/<service>` | Protected-resource metadata. |
 | `/.well-known/oauth-authorization-server` | Authorization-server metadata. |
 | `/register`, `/authorize`, `/token` | OAuth: registration, the sign-in page, tokens. |
+| `/callback` | Where an upstream provider sends people back, when they sign in through one. |
 | `/healthz` | Liveness, no authentication. |
 | `/favicon.ico` | The icon given to `Server::icon`. |
 
