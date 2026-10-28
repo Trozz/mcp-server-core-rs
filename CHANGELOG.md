@@ -25,6 +25,12 @@ as before, and nobody is signed out by upgrading.
 - A documentation site, <https://trozz.github.io/mcp-server-core-rs/>, built with mdBook from
   `docs/` and published from `main`. Its Rust examples are compiled as doctests.
 
+### Security
+
+- The lockfile takes rustls-webpki 0.103.16 and webpki-root-certs 1.0.11, which stop trusting
+  distrusted certificate intermediates (RUSTSEC-2026-0382, RUSTSEC-2026-0383). Run
+  `cargo update -p rustls-webpki -p webpki-root-certs` in your own servers too.
+
 ### Fixed
 
 - The README quick start and the examples import `mcp_server_core::rmcp`. rmcp's macros name the

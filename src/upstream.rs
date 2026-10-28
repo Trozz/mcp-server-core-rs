@@ -2,7 +2,7 @@
 //! provider (FreeAgent, GitHub, Google and the like) instead of pasting a key, and the credential
 //! the provider grants is sealed into their tokens like any other carried credential.
 //!
-//! A [`CredentialVerifier`](crate::credential::CredentialVerifier) opts in by returning an
+//! A [`CredentialVerifier`] opts in by returning an
 //! [`UpstreamSignIn`] from [`upstream`](crate::credential::CredentialVerifier::upstream). The
 //! sign-in page then asks the person to approve the MCP client and continue to the provider, and
 //! the server, acting as the provider's OAuth client, finishes the sign-in at
