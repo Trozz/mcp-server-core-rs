@@ -46,7 +46,7 @@ jobs:
           fi
           echo "release=true" >> "$GITHUB_OUTPUT"
       - if: steps.version.outputs.release == 'true'
-        uses: dtolnay/rust-toolchain@1.99.1
+        uses: dtolnay/rust-toolchain@1.120.0
       - if: steps.version.outputs.release == 'true'
         run: cargo test --all-features --locked
       - name: release notes from CHANGELOG.md
