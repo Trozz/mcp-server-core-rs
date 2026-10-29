@@ -7,6 +7,13 @@ the API).
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: the re-exported `rmcp` moves from 3.5 to 3.8 (`~3.8.0`). `ServerHandler` is unchanged,
+  so the policy wrapper still forwards every method; servers that name `rmcp` types directly
+  should move their own `rmcp` dependency to 3.8 as well.
+- The lockfile takes tokio 1.54.1 and the latest compatible versions of other dependencies.
+
 ## [0.2.0] - 2026-10-28
 
 Nothing changes for servers that already run on 0.1: their sign-in, tokens and configuration work
