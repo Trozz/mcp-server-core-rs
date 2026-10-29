@@ -47,7 +47,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 metrics = "0.24.6"
 # Re-exported as `mcp_server_core::rmcp`. Patch releases only: the policy wrapper forwards every
 # `ServerHandler` method, so a new minor version needs a release of this crate.
-rmcp = { version = "~3.5.1", features = ["server", "macros", "transport-streamable-http-server"] }
+rmcp = { version = "~3.8.0", features = ["server", "macros", "transport-streamable-http-server"] }
 
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"], optional = true }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"], optional = true }
