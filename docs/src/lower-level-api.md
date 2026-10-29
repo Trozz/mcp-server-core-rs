@@ -388,7 +388,7 @@ Without them the crate pulls in fewer dependencies. The public API is the same e
 
 ```toml
 [dependencies]
-mcp-server-core = { version = "0.2", default-features = false }
+mcp-server-core = { version = "0.3", default-features = false }
 ```
 
 or to keep only metrics, add `features = ["prometheus"]`. CI builds and lints the crate with every feature and with none.
