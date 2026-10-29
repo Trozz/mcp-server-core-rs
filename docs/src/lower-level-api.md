@@ -340,7 +340,7 @@ Use the same token for `ServiceContext::shutdown`, so open MCP sessions end when
 | Path | Crate | Version |
 |---|---|---|
 | `mcp_server_core::axum` | [axum](https://docs.rs/axum/0.8) | 0.8 |
-| `mcp_server_core::rmcp` | [rmcp](https://docs.rs/rmcp/3.5) | 3.5, with the `server`, `macros` and `transport-streamable-http-server` features |
+| `mcp_server_core::rmcp` | [rmcp](https://docs.rs/rmcp/3.8) | 3.8, with the `server`, `macros` and `transport-streamable-http-server` features |
 
 Both appear in this crate's API: `axum::Router` in `Service::router`, `build_app` and `wrap_router`; rmcp's `ServerHandler`, models and request context in `DynHandler`, `Guarded`, `Combined` and the `prompt` helpers. Use them through these paths, so your types are the ones the crate expects. A second copy of rmcp or axum at another version in your dependency tree gives types that do not match, and errors that are hard to read.
 
