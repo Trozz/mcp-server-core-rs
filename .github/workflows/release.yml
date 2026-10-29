@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths: [Cargo.toml]
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -40,8 +41,13 @@ jobs:
             fi
             echo "release=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
-            echo "$tag is already tagged: nothing to release"
+          if [ "$REF_NAME" != "main" ]; then
+            echo "releases run only from main or a tag, not $REF_NAME"; exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1 && curl -sSf -o /dev/null \
+            -A "mcp-server-core release (github.com/Trozz/mcp-server-core-rs)" \
+            "https://crates.io/api/v1/crates/mcp-server-core/$version"; then
+            echo "$tag is already released: nothing to do"
             echo "release=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "release=true" >> "$GITHUB_OUTPUT"

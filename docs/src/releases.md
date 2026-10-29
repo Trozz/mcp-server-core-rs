@@ -82,11 +82,11 @@ git push origin v0.1.1
 
 ### What the release workflow does
 
-The `release` workflow ([`.github/workflows/release.yml`](https://github.com/Trozz/mcp-server-core-rs/blob/main/.github/workflows/release.yml)) starts on a push to `main` that changes `Cargo.toml`, and on a pushed tag that matches `v*.*.*`. On Ubuntu with Rust 1.99.1, it:
+The `release` workflow ([`.github/workflows/release.yml`](https://github.com/Trozz/mcp-server-core-rs/blob/main/.github/workflows/release.yml)) starts on a push to `main` that changes `Cargo.toml`, on a pushed tag that matches `v*.*.*`, and by hand from the Actions tab (**Run workflow** on `main`), for example to retry a failed release. On Ubuntu with Rust 1.99.1, it:
 
 | Step | What happens | Fails with |
 |---|---|---|
-| Version to release | The tag is `v` followed by `version` from `Cargo.toml`. On a push to `main`, when that tag already exists, the workflow stops here: `<tag> is already tagged: nothing to release`. On a pushed tag, the tag must match. | `tag <tag> does not match Cargo.toml version <version>` |
+| Version to release | The tag is `v` followed by `version` from `Cargo.toml`. On `main`, when the GitHub release and the crates.io version both exist, the workflow stops here: `<tag> is already released: nothing to do`. On a pushed tag, the tag must match. | `tag <tag> does not match Cargo.toml version <version>`, or `releases run only from main or a tag` for a manual run on another branch |
 | Tests | `cargo test --all-features --locked`. | Any failing test |
 | Release notes | Takes the section of `CHANGELOG.md` under `## [X.Y.Z]`, up to the next `## [` heading or the link definitions at the bottom. | `no CHANGELOG.md section for <tag>` when the section is missing or empty |
 | GitHub release | `gh release create` titled with the tag, with those notes. On a push to `main` this also creates the tag on the merge commit. When a release for the tag already exists, for example on a re-run, it says so and goes on. | A `gh` error |
