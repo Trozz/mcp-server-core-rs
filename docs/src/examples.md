@@ -81,7 +81,7 @@ Each answer is a short server-sent event stream whose last `data:` line holds th
 
 A call signed in through OAuth records `caller` as `oauth:<client_id>` and `subject` as `owner`. [Read-only mode and the audit log](read-only-and-audit.md) explains every field.
 
-**The binary's flags and configuration errors.** `cargo run --example notes -- --version` prints the name and version, such as `mcp-notes 0.2.0`. Run it without any environment and it lists every missing variable, then exits with status 1:
+**The binary's flags and configuration errors.** `cargo run --example notes -- --version` prints the name and version, such as `mcp-notes 0.3.0`. Run it without any environment and it lists every missing variable, then exits with status 1:
 
 ```text
 configuration error: PUBLIC_URL is required
