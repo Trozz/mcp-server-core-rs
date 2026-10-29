@@ -30,7 +30,7 @@ The crate's API includes types from [rmcp](https://crates.io/crates/rmcp) and [a
 
 | Dependency | Requirement in `Cargo.toml` | Accepts |
 |---|---|---|
-| rmcp | `~3.5.1` | 3.5.1 and later 3.5 patch releases, never 3.6 |
+| rmcp | `~3.8.0` | 3.8.0 and later 3.8 patch releases, never 3.9 |
 | axum | `0.8.9` | 0.8.9 and later 0.8 releases, never 0.9 |
 
 rmcp is held to one minor version on purpose. The [policy wrapper](read-only-and-audit.md#the-policy-module) forwards every method of rmcp's `ServerHandler` trait to your handler, so a new rmcp minor version, which may add or change methods, needs a release of this crate that forwards them too. This crate therefore follows rmcp's minor versions: moving to a new one is a new minor version here. Use rmcp through the re-export rather than adding it to your own `Cargo.toml`, so the versions always match.
@@ -68,11 +68,12 @@ To report a vulnerability, see [Security model](security.md#reporting-a-vulnerab
 
 ## The release process
 
-A release is a tag. The steps, from the repository's [CONTRIBUTING.md](https://github.com/Trozz/mcp-server-core-rs/blob/main/CONTRIBUTING.md#releasing):
+A release is a version bump merged to `main`. The steps, from the repository's [CONTRIBUTING.md](https://github.com/Trozz/mcp-server-core-rs/blob/main/CONTRIBUTING.md#releasing):
 
 1. Move the entries under `## [Unreleased]` in `CHANGELOG.md` to a new heading `## [X.Y.Z] - YYYY-MM-DD` with today's date (and, as for `[0.1.0]`, a link for it at the bottom), and set `version` in `Cargo.toml` to `X.Y.Z`.
-2. Merge the change to `main`.
-3. Tag the merge commit `vX.Y.Z` and push the tag:
+2. Merge the change to `main`. The release workflow tags the merge commit `vX.Y.Z` and releases it.
+
+Pushing a `vX.Y.Z` tag by hand also starts a release, for example to release a commit other than the head of `main`:
 
 ```sh
 git tag v0.1.1
@@ -81,17 +82,17 @@ git push origin v0.1.1
 
 ### What the release workflow does
 
-Pushing a tag that matches `v*.*.*` starts the `release` workflow ([`.github/workflows/release.yml`](https://github.com/Trozz/mcp-server-core-rs/blob/main/.github/workflows/release.yml)). On Ubuntu with Rust 1.99.1, it:
+The `release` workflow ([`.github/workflows/release.yml`](https://github.com/Trozz/mcp-server-core-rs/blob/main/.github/workflows/release.yml)) starts on a push to `main` that changes `Cargo.toml`, and on a pushed tag that matches `v*.*.*`. On Ubuntu with Rust 1.99.1, it:
 
 | Step | What happens | Fails with |
 |---|---|---|
-| Tag matches `Cargo.toml` | The tag must be `v` followed by `version` from `Cargo.toml`. | `tag <tag> does not match Cargo.toml version <version>` |
+| Version to release | The tag is `v` followed by `version` from `Cargo.toml`. On a push to `main`, when that tag already exists, the workflow stops here: `<tag> is already tagged: nothing to release`. On a pushed tag, the tag must match. | `tag <tag> does not match Cargo.toml version <version>` |
 | Tests | `cargo test --all-features --locked`. | Any failing test |
 | Release notes | Takes the section of `CHANGELOG.md` under `## [X.Y.Z]`, up to the next `## [` heading or the link definitions at the bottom. | `no CHANGELOG.md section for <tag>` when the section is missing or empty |
-| GitHub release | `gh release create` titled with the tag, with those notes, for the existing tag (`--verify-tag`). When a release for the tag already exists, for example on a re-run, it says so and goes on. | A `gh` error |
-| crates.io | `cargo publish --locked`, when the repository secret `CARGO_REGISTRY_TOKEN` is set. | |
+| GitHub release | `gh release create` titled with the tag, with those notes. On a push to `main` this also creates the tag on the merge commit. When a release for the tag already exists, for example on a re-run, it says so and goes on. | A `gh` error |
+| crates.io | Gets a short-lived token through [trusted publishing](https://crates.io/docs/trusted-publishing) (`rust-lang/crates-io-auth-action`), then `cargo publish --locked`. | An auth error when the crate has no trusted publisher for this workflow |
 
-The crates.io step skips itself, without failing, in two cases: when `CARGO_REGISTRY_TOKEN` is not set (`CARGO_REGISTRY_TOKEN is not set: skipping crates.io`), and when crates.io already has the version (`X.Y.Z is already on crates.io: skipping`). If the workflow fails after the GitHub release was created, re-run it: the release step and, once the version is on crates.io, the publish step both skip what is already done.
+The crates.io steps skip themselves when crates.io already has the version (`X.Y.Z is already on crates.io: skipping`). If the workflow fails after the GitHub release was created, re-run it: the release step and, once the version is on crates.io, the publish step both skip what is already done.
 
 The package contains `src/`, `examples/`, the pages of this site, the README, changelog, security policy and both licences, as listed under `include` in `Cargo.toml`. CI runs `cargo package --locked` on every pull request and push to `main`, so a packaging problem shows up before a release is tagged.
 
@@ -111,6 +112,6 @@ The site therefore describes `main`, which can be ahead of the latest release on
 
 ## Repository setup (maintainers)
 
-- **crates.io**: add a crates.io API token as the repository secret `CARGO_REGISTRY_TOKEN`. Without it, releases are created on GitHub only.
-- **Workflow permissions**: every workflow defaults to `contents: read`. The release job requests `contents: write` to create the GitHub release, and the docs deploy job `pages: write` and `id-token: write`.
+- **crates.io**: in the crate's settings on crates.io, add a trusted publisher for GitHub with owner `Trozz`, repository `mcp-server-core-rs` and workflow `release.yml`. No token secret is needed.
+- **Workflow permissions**: every workflow defaults to `contents: read`. The release job requests `contents: write` to create the tag and GitHub release, `id-token: write` for trusted publishing, and the docs deploy job `pages: write` and `id-token: write`.
 - **GitHub Pages**: under **Settings > Pages**, the source must be **GitHub Actions** for the docs workflow to publish.

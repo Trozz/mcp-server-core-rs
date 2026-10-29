@@ -49,9 +49,9 @@ LOG_FORMAT=pretty cargo run --example notes
 
 1. Move the changelog entries under the new version with today's date and set `version` in
    `Cargo.toml`.
-2. Merge to `main`, then tag the merge commit `vX.Y.Z` and push the tag.
-3. The release workflow checks the tag matches `Cargo.toml`, runs the tests, creates the GitHub
-   release and, when the `CARGO_REGISTRY_TOKEN` secret is set, publishes to crates.io.
+2. Merge to `main`. The release workflow sees the new version in `Cargo.toml`, runs the tests,
+   tags the merge commit `vX.Y.Z`, creates the GitHub release and publishes to crates.io through
+   trusted publishing. Pushing a `vX.Y.Z` tag by hand runs the same steps.
 
 ## Licence
 

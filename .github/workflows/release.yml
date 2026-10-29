@@ -2,6 +2,8 @@ name: release
 
 on:
   push:
+    branches: [main]
+    paths: [Cargo.toml]
     tags: ["v*.*.*"]
 
 permissions:
@@ -17,23 +19,40 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - name: tag matches Cargo.toml
+      - name: version to release
+        id: version
         env:
-          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "v$version" != "$TAG" ]; then
-            echo "tag $TAG does not match Cargo.toml version $version"; exit 1
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$REF_TYPE" = "tag" ]; then
+            if [ "$tag" != "$REF_NAME" ]; then
+              echo "tag $REF_NAME does not match Cargo.toml version $version"; exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-      - run: cargo test --all-features --locked
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag is already tagged: nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+      - if: steps.version.outputs.release == 'true'
+        uses: dtolnay/rust-toolchain@1.99.1
+      - if: steps.version.outputs.release == 'true'
+        run: cargo test --all-features --locked
       - name: release notes from CHANGELOG.md
+        if: steps.version.outputs.release == 'true'
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           awk -v v="${TAG#v}" '
             $0 ~ "^## \\[" v "\\]" { found = 1; next }
@@ -43,25 +62,33 @@ jobs:
           ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           test -s "$RUNNER_TEMP/notes.md" || { echo "no CHANGELOG.md section for $TAG"; exit 1; }
       - name: GitHub release
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG already exists"
           else
-            gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+            gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA"
           fi
-      - name: publish to crates.io
+      - name: already on crates.io
+        id: published
+        if: steps.version.outputs.release == 'true'
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo "CARGO_REGISTRY_TOKEN is not set: skipping crates.io"; exit 0
-          fi
           if curl -sSf -o /dev/null -A "mcp-server-core release (github.com/Trozz/mcp-server-core-rs)" \
             "https://crates.io/api/v1/crates/mcp-server-core/${TAG#v}"; then
-            echo "${TAG#v} is already on crates.io: skipping"; exit 0
+            echo "${TAG#v} is already on crates.io: skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
-          cargo publish --locked
+      - name: crates.io trusted publishing token
+        id: auth
+        if: steps.version.outputs.release == 'true' && steps.published.outputs.skip != 'true'
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: publish to crates.io
+        if: steps.version.outputs.release == 'true' && steps.published.outputs.skip != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
