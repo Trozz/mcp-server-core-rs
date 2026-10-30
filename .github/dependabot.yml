@@ -11,3 +11,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Tags follow Rust versions; the toolchain is pinned by hand.
+      - dependency-name: dtolnay/rust-toolchain
