@@ -15,10 +15,10 @@ From 1.0, only a major version may break the API. Until then, depend on a minor 
 
 ```toml
 [dependencies]
-mcp-server-core = "0.3"
+mcp-server-core = "0.4"
 ```
 
-Cargo reads `"0.3"` as `>=0.3.0, <0.4.0`: you get patch releases with `cargo update`, and never a new minor version without changing the requirement.
+Cargo reads `"0.4"` as `>=0.4.0, <0.5.0`: you get patch releases with `cargo update`, and never a new minor version without changing the requirement.
 
 An upgrade can affect a running server as well as your code. The 0.1.0 entry, for example, says that tokens issued by the servers' earlier copies of this code lack the new claims, so everyone signs in once more after upgrading. Read the **Changed** section before upgrading a deployed server.
 
@@ -30,7 +30,7 @@ The crate's API includes types from [rmcp](https://crates.io/crates/rmcp) and [a
 
 | Dependency | Requirement in `Cargo.toml` | Accepts |
 |---|---|---|
-| rmcp | `~3.8.0` | 3.8.0 and later 3.8 patch releases, never 3.9 |
+| rmcp | `~3.9.0` | 3.9.0 and later 3.9 patch releases, never 3.10 |
 | axum | `0.8.9` | 0.8.9 and later 0.8 releases, never 0.9 |
 
 rmcp is held to one minor version on purpose. The [policy wrapper](read-only-and-audit.md#the-policy-module) forwards every method of rmcp's `ServerHandler` trait to your handler, so a new rmcp minor version, which may add or change methods, needs a release of this crate that forwards them too. This crate therefore follows rmcp's minor versions: moving to a new one is a new minor version here. Use rmcp through the re-export rather than adding it to your own `Cargo.toml`, so the versions always match.
@@ -62,7 +62,7 @@ Until 1.0, only the latest minor version receives security fixes. Fixes are rele
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
+| 0.4.x | Yes |
 
 To report a vulnerability, see [Security model](security.md#reporting-a-vulnerability).
 
