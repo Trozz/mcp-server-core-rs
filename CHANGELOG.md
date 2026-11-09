@@ -7,6 +7,26 @@ the API).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-09
+
+### Added
+
+- The policy wrapper forwards rmcp 3.9's Skills extension (SEP-2640): `skills/list`, `skills/get`
+  and `resources/directory/read` reach a service's handler. Without the forwards a service that
+  declared skills would have answered "method not found".
+
+### Changed
+
+- Breaking: the re-exported `rmcp` moves from 3.8 to 3.9 (`~3.9.0`). Servers that name `rmcp`
+  types directly, or pin their own `rmcp`, should move it to 3.9 as well.
+
+### Security
+
+- rmcp 3.9.0 fixes RUSTSEC-2026-0462 (unbounded response body buffering in Streamable HTTP
+  clients). This crate enables only rmcp's server features, so it was not affected, but
+  `cargo deny check` reports the advisory for any lockfile with rmcp 3.8. Moving to 0.4 lets
+  your servers take rmcp 3.9 and drop any ignore added for it.
+
 ## [0.3.0] - 2026-10-29
 
 ### Changed
@@ -139,6 +159,7 @@ copy of this code.
 - Client ID Metadata Documents, which the MCP authorization spec now prefers to dynamic client
   registration.
 
+[0.4.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Trozz/mcp-server-core-rs/releases/tag/v0.1.0

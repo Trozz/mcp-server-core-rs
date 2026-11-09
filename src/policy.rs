@@ -343,6 +343,31 @@ impl<S: ServerHandler> ServerHandler for Guarded<S> {
         self.inner.read_resource(request, context)
     }
 
+    fn read_resource_directory(
+        &self,
+        request: ReadResourceDirectoryRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ReadResourceDirectoryResult, McpError>> + MaybeSendFuture + '_
+    {
+        self.inner.read_resource_directory(request, context)
+    }
+
+    fn list_skills(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListSkillsResult, McpError>> + MaybeSendFuture + '_ {
+        self.inner.list_skills(request, context)
+    }
+
+    fn get_skill(
+        &self,
+        request: GetSkillRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<GetSkillResult, McpError>> + MaybeSendFuture + '_ {
+        self.inner.get_skill(request, context)
+    }
+
     fn accepted_subscription_filter(
         &self,
         requested: &SubscriptionFilter,

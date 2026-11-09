@@ -7,7 +7,13 @@ use mcp_server_core::jwt::{Claims, Payload, TokenKind};
 use mcp_server_core::policy::{AuditLog, Guarded, ToolPolicy};
 use mcp_server_core::service::{HttpSettings, ServiceContext, mcp_service};
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::{
+    CallToolResult, ContentBlock, GetSkillRequestParams, GetSkillResult, ListResourcesResult,
+    ListSkillsResult, PaginatedRequestParams, ReadResourceDirectoryRequestParams,
+    ReadResourceDirectoryResult, Resource, ServerCapabilities, ServerConfig, Skill,
+    SkillFrontmatter, SkillResources,
+};
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -359,4 +365,91 @@ async fn an_explicit_policy_applies_without_a_request_extension() {
     assert_eq!(audit.len(), 1, "{audit:?}");
     assert_eq!(audit[0]["endpoint"], "/combined");
     assert_eq!(audit[0]["outcome"], "refused");
+}
+
+/// Serves one skill and one directory: the Skills extension (SEP-2640) of rmcp 3.9.
+#[derive(Clone)]
+struct Skills;
+
+const SKILL_URI: &str = "skill://notes/SKILL.md";
+
+impl ServerHandler for Skills {
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_resources()
+                .enable_skills_with_directory_read()
+                .build(),
+        )
+    }
+
+    async fn list_skills(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListSkillsResult, McpError> {
+        Ok(ListSkillsResult::with_all_items(vec![skill()]))
+    }
+
+    async fn get_skill(
+        &self,
+        _request: GetSkillRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetSkillResult, McpError> {
+        Ok(GetSkillResult::new(skill()))
+    }
+
+    async fn read_resource_directory(
+        &self,
+        _request: ReadResourceDirectoryRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceDirectoryResult, McpError> {
+        Ok(ListResourcesResult::with_all_items(vec![Resource::new(
+            SKILL_URI, "SKILL.md",
+        )]))
+    }
+}
+
+fn skill() -> Skill {
+    Skill::new(
+        SKILL_URI,
+        SkillFrontmatter::new("notes", "Takes notes"),
+        SkillResources::Dynamic,
+    )
+}
+
+/// The policy wrapper forwards the skills methods instead of answering "method not found".
+#[tokio::test]
+async fn skills_and_directories_reach_the_service() {
+    let audit = Arc::new(AuditLog::new(None));
+    let router = mcp_service(&ctx(), || Ok(Skills)).layer(axum::Extension(policy(true, audit)));
+    let app = axum::Router::new().nest_service("/svc", router);
+    let s = session(&app).await;
+    let ask = |id: u32, method: &str, params: Value| {
+        rpc(
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+            Some(&s),
+        )
+    };
+
+    let v = message(
+        app.clone()
+            .oneshot(ask(4, "skills/list", json!({})))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(v["result"]["skills"][0]["uri"], SKILL_URI, "{v}");
+
+    let req = ask(5, "skills/get", json!({"uri": SKILL_URI}));
+    let v = message(app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(v["result"]["skill"]["uri"], SKILL_URI, "{v}");
+
+    let req = ask(
+        6,
+        "resources/directory/read",
+        json!({"uri": "skill://notes"}),
+    );
+    let v = message(app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(v["result"]["resources"][0]["uri"], SKILL_URI, "{v}");
 }
